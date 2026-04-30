@@ -22,6 +22,7 @@ enum Command {
     Init(commands::init::InitArgs),
     Doctor(commands::doctor::DoctorArgs),
     Fuzz(commands::fuzz::FuzzArgs),
+    Differential(commands::differential::DifferentialArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,6 +34,9 @@ async fn main() -> Result<()> {
         Some(Command::Init(args)) => commands::init::run(args).await,
         Some(Command::Doctor(args)) => commands::doctor::run(args, cli.config.as_deref()).await,
         Some(Command::Fuzz(args)) => commands::fuzz::run(args, cli.config.as_deref()).await,
+        Some(Command::Differential(args)) => {
+            commands::differential::run(args, cli.config.as_deref()).await
+        }
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())

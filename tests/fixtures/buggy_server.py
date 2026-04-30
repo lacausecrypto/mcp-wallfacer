@@ -86,10 +86,13 @@ TOOLS = [
         "name": "paginate",
         "description": "BUG: sometimes returns limit + 1 items.",
         "inputSchema": object_schema(
-            {"page": {"type": "integer"}, "limit": {"type": "integer", "minimum": 1}}
+            {
+                "page": {"type": "integer", "minimum": 0, "maximum": 100},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            }
         ),
         "outputSchema": object_schema(
-            {"items": {"type": "array", "items": {"type": "integer"}}}
+            {"items": {"type": "array", "items": {"type": "integer"}, "maxItems": 50}}
         ),
     },
     {

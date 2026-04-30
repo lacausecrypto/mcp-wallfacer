@@ -1,5 +1,6 @@
 pub mod client;
 pub mod corpus;
+pub mod differential;
 pub mod finding;
 pub mod mutate;
 pub mod seed;
