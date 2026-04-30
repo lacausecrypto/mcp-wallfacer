@@ -1,0 +1,201 @@
+# Pack — `path-traversal`
+
+> Probes filesystem-bridging tools for path-traversal escapes.
+
+**Tags:** `security`, `filesystem`
+**Authors:** wallfacer-core
+
+## Parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `read_file_tool` | string | `read_file` | Tool that reads a file by path. |
+| `sensitive_unix_pattern` | string | `(?i)root:.*:/bin/(ba)?sh` | Regex of `/etc/passwd`-style content that must never leak. |
+| `write_file_tool` | string | `write_file` | Tool that writes a file by path. |
+
+## Invariants
+
+### `path.dotdot_segments_rejected_by_read_file`
+
+- **Tool:** `read_file`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `path.absolute_paths_outside_root_rejected`
+
+- **Tool:** `read_file`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `path.windows_unc_rejected`
+
+- **Tool:** `read_file`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `path.symlink_escape_rejected_by_write_file`
+
+- **Tool:** `write_file`
+- **Inputs:** fixed (2 field(s))
+- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `path.url_encoded_traversal_normalised_or_rejected`
+
+- **Tool:** `read_file`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+## Source
+
+Raw YAML, embedded into the binary at compile time:
+
+```yaml
+# Path-traversal rule pack.
+#
+# Probes file-handling tools with classic traversal payloads and asserts
+# the response cannot contain content from outside the intended root.
+# Loadable via: `wallfacer property --pack path-traversal`.
+#
+# Phase G — v3 with parameters: override the read/write tool names if
+# yours don't match the defaults.
+#
+#   [packs.path-traversal]
+#   read_file_tool = "fs_read"
+#   write_file_tool = "fs_write"
+version: 3
+metadata:
+  name: path-traversal
+  description: "Probes filesystem-bridging tools for path-traversal escapes."
+  authors: ["wallfacer-core"]
+  tags: [security, filesystem]
+  parameters:
+    read_file_tool:
+      description: "Tool that reads a file by path."
+      type: string
+      default: "read_file"
+    write_file_tool:
+      description: "Tool that writes a file by path."
+      type: string
+      default: "write_file"
+    sensitive_unix_pattern:
+      description: "Regex of `/etc/passwd`-style content that must never leak."
+      type: string
+      default: "(?i)root:.*:/bin/(ba)?sh"
+
+invariants:
+  - name: "path.dotdot_segments_rejected_by_read_file"
+    tool: "{{read_file_tool}}"
+    fixed:
+      path: "../../../etc/passwd"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: '{{sensitive_unix_pattern}}'
+    test_fixtures:
+      - name: "passes when traversal is rejected"
+        response: { isError: true, content: [{ type: "text", text: "invalid path" }] }
+        expect: pass
+      - name: "passes when path is normalised (no leak)"
+        response: { isError: false, content: [{ type: "text", text: "(empty)" }] }
+        expect: pass
+      - name: "fails when /etc/passwd leaks"
+        response:
+          isError: false
+          content:
+            - { type: "text", text: "root:x:0:0:root:/root:/bin/bash\nnobody:x:1:1:nobody:/:/bin/sh" }
+        expect: fail
+
+  - name: "path.absolute_paths_outside_root_rejected"
+    tool: "{{read_file_tool}}"
+    fixed:
+      path: "/etc/shadow"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)root:|nobody:"
+    test_fixtures:
+      - name: "passes when error returned"
+        response: { isError: true, content: [{ type: "text", text: "access denied" }] }
+        expect: pass
+      - name: "fails when shadow content leaks"
+        response: { isError: false, content: [{ type: "text", text: "root:$6$abcdef:19000:0:99999:7:::" }] }
+        expect: fail
+
+  - name: "path.windows_unc_rejected"
+    tool: "{{read_file_tool}}"
+    fixed:
+      path: "\\\\evilhost\\share\\hosts"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+    test_fixtures:
+      - name: "passes when UNC rejected"
+        response: { isError: true }
+        expect: pass
+      - name: "fails when UNC silently followed"
+        response: { isError: false, content: [{ type: "text", text: "127.0.0.1 localhost" }] }
+        expect: fail
+
+  - name: "path.symlink_escape_rejected_by_write_file"
+    tool: "{{write_file_tool}}"
+    fixed:
+      path: "../escaped.txt"
+      contents: "<wallfacer-secret>"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+    test_fixtures:
+      - name: "passes when write rejected"
+        response: { isError: true }
+        expect: pass
+      - name: "fails when write succeeds outside root"
+        response: { isError: false, structuredContent: { ok: true } }
+        expect: fail
+
+  - name: "path.url_encoded_traversal_normalised_or_rejected"
+    tool: "{{read_file_tool}}"
+    fixed:
+      path: "..%2F..%2F..%2Fetc%2Fpasswd"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: '{{sensitive_unix_pattern}}'
+    test_fixtures:
+      - name: "passes when encoded traversal rejected"
+        response: { isError: true }
+        expect: pass
+      - name: "fails when decode-then-resolve leaks /etc/passwd"
+        response:
+          isError: false
+          content:
+            - { type: "text", text: "root:x:0:0:root:/root:/bin/bash" }
+        expect: fail
+```

@@ -1,0 +1,113 @@
+# Phase K — scaffolded workflow for running wallfacer rule packs
+# against external MCP servers on a schedule. NOT enabled by default:
+# the targets, overrides, and reporting all need human curation. Edit
+# the matrix below + uncomment the `schedule` trigger when you're ready
+# to run it.
+name: Real-world packs
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target MCP server identifier from the matrix below"
+        required: false
+        default: ""
+  # schedule:
+  #   - cron: "0 7 * * 1"   # Mondays 07:00 UTC
+
+permissions:
+  contents: read
+  issues: write             # to file findings as issues, when configured
+  security-events: write    # to upload SARIF when configured
+
+jobs:
+  run-packs:
+    name: ${{ matrix.target.id }} — ${{ matrix.pack }}
+    if: ${{ github.event.inputs.target == '' || github.event.inputs.target == matrix.target.id }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Replace with the servers + packs you want to run. Each entry's
+        # `command` / `args` are spliced into wallfacer.toml at startup.
+        # Use a `prepare` step to install the server (uvx, npx, cargo, ...).
+        target:
+          - id: "mcp-server-fetch"
+            install: |
+              pip install uv
+              uvx --help >/dev/null   # warm cache
+            command: "uvx"
+            args: '["mcp-server-fetch"]'
+            packs:
+              - secrets-leakage
+              - unicode
+              - large-payload
+              - error-shape
+              - tool-annotations
+          - id: "mcp-server-filesystem"
+            install: |
+              npm install -g @modelcontextprotocol/server-filesystem
+            command: "mcp-server-filesystem"
+            args: '["/tmp"]'
+            packs:
+              - secrets-leakage
+              - path-traversal
+              - large-payload
+              - error-shape
+              - tool-annotations
+        pack: ${{ fromJSON('["secrets-leakage", "unicode", "large-payload", "error-shape", "tool-annotations", "path-traversal"]') }}
+        # Filter: only run a (target, pack) pair when the pack is in the
+        # target's `packs` list above.
+        include: []
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip irrelevant pack for this target
+        run: |
+          if ! echo '${{ toJSON(matrix.target.packs) }}' | jq -e --arg p '${{ matrix.pack }}' 'index($p)' >/dev/null; then
+            echo "::notice::pack ${{ matrix.pack }} not configured for target ${{ matrix.target.id }}; skipping"
+            exit 78
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wallfacer (workspace HEAD)
+        run: cargo install --path crates/mcp-wallfacer-cli
+
+      - name: Install MCP target
+        run: ${{ matrix.target.install }}
+
+      - name: Configure wallfacer.toml
+        run: |
+          mkdir -p run/${{ matrix.target.id }}
+          cat > run/${{ matrix.target.id }}/wallfacer.toml <<EOF
+          [target]
+          kind = "stdio"
+          command = "${{ matrix.target.command }}"
+          args = ${{ matrix.target.args }}
+          timeout_ms = 5000
+          EOF
+
+      - name: Run pack
+        id: pack
+        run: |
+          cd run/${{ matrix.target.id }}
+          wallfacer property --pack ${{ matrix.pack }} --format json --seed 0 > pack.json || true
+          jq '.findings | length' pack.json
+
+      - name: Upload findings as artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-${{ matrix.target.id }}-${{ matrix.pack }}
+          path: run/${{ matrix.target.id }}/pack.json
+
+      # When you're ready to file findings as issues, configure a
+      # GH_TOKEN with `issues: write` and uncomment:
+      # - name: File issue per finding
+      #   if: steps.pack.outputs.count > 0
+      #   uses: peter-evans/create-issue-from-file@v5
+      #   with:
+      #     title: "wallfacer: ${{ matrix.pack }} findings on ${{ matrix.target.id }}"
+      #     content-filepath: run/${{ matrix.target.id }}/pack.json

@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/wallfacer-core", "crates/mcp-wallfacer-cli"]
+members = [
+    "crates/wallfacer-core",
+    "crates/mcp-wallfacer-cli",
+    "crates/wallfacer-tools",
+]
 resolver = "2"
 
 [workspace.package]

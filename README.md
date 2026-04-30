@@ -114,14 +114,64 @@ wallfacer torture --mode state-leak
 wallfacer corpus list
 ```
 
+## Rule packs
+
+15 invariant packs ship embedded in the binary. Discover them with `wallfacer pack list`; render the human reference with `cargo run -p wallfacer-tools -- gen-pack-docs` (output under [`docs/packs/`](docs/packs/index.md)).
+
+### When to use which pack
+
+| If your server… | Pack | Catches |
+|---|---|---|
+| has any user-facing tool | [`secrets-leakage`](docs/packs/secrets-leakage.md) | bearer/api-key/secret strings echoed in responses |
+| has any user-facing tool | [`unicode`](docs/packs/unicode.md) | RTL override, ZWJ, escape-sequence echoes |
+| has any user-facing tool | [`large-payload`](docs/packs/large-payload.md) | graceful handling of 10 MB strings / 1M items |
+| has any user-facing tool | [`error-shape`](docs/packs/error-shape.md) | envelope shape, no stack traces, no internal paths |
+| has authentication (whoami/login) | [`auth`](docs/packs/auth.md) | anonymous rejection, bearer echo, session cookies |
+| has RBAC | [`authorization`](docs/packs/authorization.md) | role filtering, escalation, ACL on resources |
+| bridges to a filesystem | [`path-traversal`](docs/packs/path-traversal.md) | `../`, absolute, UNC, URL-encoded, symlink escapes |
+| bridges to a database | [`injection-sql`](docs/packs/injection-sql.md) | `'; DROP`, UNION SELECT, comment bypass |
+| spawns processes | [`injection-shell`](docs/packs/injection-shell.md) | `;`, `&&`, backticks, `$(...)` expansion |
+| proxies LLM completions | [`prompt-injection`](docs/packs/prompt-injection.md) | "ignore previous", role override, jailbreak markers |
+| paginates lists | [`pagination`](docs/packs/pagination.md) | limit honored, cursor stable, no leak across pages |
+| declares `idempotentHint: true` | [`idempotency`](docs/packs/idempotency.md) | envelope stability under repeated calls |
+| declares any MCP annotations | [`tool-annotations`](docs/packs/tool-annotations.md) | hints match observable behaviour |
+| bridges to a rate-limited API | [`rate-limit`](docs/packs/rate-limit.md) | quota envelope shape, 429 with Retry-After |
+| **wants a security baseline** | [`security`](docs/packs/security.md) | meta-pack: auth + authorization + path-traversal + injection-* + prompt-injection + secrets-leakage |
+
+```bash
+# Run a single pack against your server (after `wallfacer init`):
+wallfacer property --pack secrets-leakage
+
+# Compose multiple:
+wallfacer property --pack auth --pack error-shape
+
+# Run every embedded pack:
+wallfacer property --pack-all
+
+# Override a pack's tool-name parameter for your codebase:
+wallfacer property --pack auth --param whoami_tool=getCurrentUser
+```
+
+Override patterns persist in `wallfacer.toml`:
+
+```toml
+[packs.auth]
+whoami_tool = "getCurrentUser"
+list_resources_tool = "myListResources"
+```
+
+Customise a pack: `wallfacer pack init <name>` copies the embedded YAML to `packs/<name>.yaml`, where you can edit it freely (workspace copy shadows the embedded one).
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — workspace layout, plan lifecycle, reproducibility contract.
 - [docs/security.md](docs/security.md) — redaction model, file permissions, replay unredaction, threat model.
+- [docs/real-world.md](docs/real-world.md) — running packs against external MCP servers, reporting upstream.
+- [docs/packs/](docs/packs/index.md) — auto-generated reference for every embedded pack.
 - API: <https://docs.rs/wallfacer-core>.
 
 ## Roadmap
 
-- v0.2 (in progress): Phases A–F — workspace hardening, full JSON Schema generation, plan layer, property DSL v2, robustness pass, DX & docs.
-- v0.3: rule packs for common MCP security and reliability issues; reusable invariant libraries.
-- v0.4: shared corpus workflows and reporting.
+- v0.2: Phases A–F — workspace hardening, full JSON Schema generation, plan layer, property DSL v2, robustness pass, DX & docs. ✅ **shipped**.
+- v0.3: rule packs for common MCP security and reliability issues; reusable invariant libraries. **in progress (Phases G–K)**.
+- v0.4: shared corpus workflows and reporting; remote pack registries.

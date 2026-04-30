@@ -1,0 +1,172 @@
+# Pack — `authorization`
+
+> Probes role-based access control on resource-listing and admin-call tools.
+
+**Tags:** `security`, `authz`, `rbac`
+**Authors:** wallfacer-core
+
+## Parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `admin_path_pattern` | string | `(?i)/admin(/\|$)` | Regex matching URIs reserved for admin users. |
+| `admin_witness_tool` | string | `delete_user` | Tool that *should* require admin privileges. |
+| `list_resources_tool` | string | `list_resources` | Tool that lists resources the caller can access. |
+| `role_field` | string | `role` | Field in the input payload that carries the caller's role. |
+
+## Invariants
+
+### `authz.list_resources_filtered_by_role`
+
+- **Tool:** `list_resources`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** for_each(`$.response.structuredContent.resources[*]`, 1 child)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `authz.admin_tool_rejects_unprivileged_caller`
+
+- **Tool:** `delete_user`
+- **Inputs:** fixed (2 field(s))
+- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `authz.role_in_response_matches_role_in_input`
+
+- **Tool:** `list_resources`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `authz.role_escalation_via_crafted_field_rejected`
+
+- **Tool:** `delete_user`
+- **Inputs:** fixed (3 field(s))
+- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+## Source
+
+Raw YAML, embedded into the binary at compile time:
+
+```yaml
+# Authorization (RBAC) rule pack.
+#
+# Complements `auth` (which checks authentication) by probing
+# role-based access control: a non-privileged user should not be able
+# to enumerate admin resources or escalate via crafted inputs.
+version: 3
+metadata:
+  name: authorization
+  description: "Probes role-based access control on resource-listing and admin-call tools."
+  authors: ["wallfacer-core"]
+  tags: [security, authz, rbac]
+  parameters:
+    list_resources_tool:
+      description: "Tool that lists resources the caller can access."
+      type: string
+      default: "list_resources"
+    admin_witness_tool:
+      description: "Tool that *should* require admin privileges."
+      type: string
+      default: "delete_user"
+    role_field:
+      description: "Field in the input payload that carries the caller's role."
+      type: string
+      default: "role"
+    admin_path_pattern:
+      description: "Regex matching URIs reserved for admin users."
+      type: string
+      default: "(?i)/admin(/|$)"
+
+invariants:
+  - name: "authz.list_resources_filtered_by_role"
+    tool: "{{list_resources_tool}}"
+    fixed:
+      "{{role_field}}": "user"
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.resources[*]"
+        assert:
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.item.uri"
+              pattern: '{{admin_path_pattern}}'
+    test_fixtures:
+      - name: "passes when no admin uri in list"
+        response:
+          structuredContent:
+            resources:
+              - { uri: "/users/me" }
+              - { uri: "/files/report.pdf" }
+        expect: pass
+      - name: "fails when admin uri leaks to non-admin"
+        response:
+          structuredContent:
+            resources:
+              - { uri: "/users/me" }
+              - { uri: "/admin/audit" }
+        expect: fail
+
+  - name: "authz.admin_tool_rejects_unprivileged_caller"
+    tool: "{{admin_witness_tool}}"
+    fixed:
+      "{{role_field}}": "user"
+      target: "anyone"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+    test_fixtures:
+      - name: "passes when call rejected"
+        response: { isError: true, content: [{ type: "text", text: "forbidden" }] }
+        expect: pass
+      - name: "fails when admin call succeeds for non-admin"
+        response: { isError: false, structuredContent: { deleted: 1 } }
+        expect: fail
+
+  - name: "authz.role_in_response_matches_role_in_input"
+    tool: "{{list_resources_tool}}"
+    fixed:
+      "{{role_field}}": "user"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.role" }
+            rhs: { path: "$.input.role" }
+          - kind: not
+            assertion:
+              kind: is_type
+              path: "$.response.structuredContent.role"
+              type: string
+    test_fixtures:
+      - name: "passes when role echoed matches input"
+        response:
+          structuredContent: { role: "user", resources: [] }
+        expect: pass
+      - name: "passes when no role echoed"
+        response: { structuredContent: { resources: [] } }
+        expect: pass
+      - name: "fails when server returns elevated role"
+        response: { structuredContent: { role: "admin", resources: [] } }
+        expect: fail
+
+  - name: "authz.role_escalation_via_crafted_field_rejected"
+    tool: "{{admin_witness_tool}}"
+    fixed:
+      "{{role_field}}": "user"
+      "__role_override": "admin"
+      target: "anyone"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+    test_fixtures:
+      - name: "passes when crafted override rejected"
+        response: { isError: true }
+        expect: pass
+      - name: "fails when override succeeds"
+        response: { isError: false, structuredContent: { deleted: 1 } }
+        expect: fail
+```

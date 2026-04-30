@@ -1,0 +1,163 @@
+# Pack — `injection-sql`
+
+> Probes a DB-bridging tool with SQL-injection payloads.
+
+**Tags:** `security`, `sql-injection`
+**Authors:** wallfacer-core
+
+## Parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `drop_table_pattern` | string | `(?i)\b(?:dropped\|truncated\|table\s+removed)\b` | Regex matching DROP TABLE / TRUNCATE acks the server should never confirm. |
+| `query_field` | string | `query` | Field name carrying the SQL string. |
+| `query_tool` | string | `query_db` | Tool that takes a SQL fragment / query and returns rows. |
+
+## Invariants
+
+### `sqli.semicolon_drop_is_rejected_or_suppressed`
+
+- **Tool:** `query_db`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `sqli.union_select_does_not_leak_password_column`
+
+- **Tool:** `query_db`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `sqli.comment_bypass_does_not_alter_envelope_shape`
+
+- **Tool:** `query_db`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** matches_schema(`$.response`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `sqli.error_messages_do_not_leak_table_names`
+
+- **Tool:** `query_db`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+## Source
+
+Raw YAML, embedded into the binary at compile time:
+
+```yaml
+# SQL-injection rule pack.
+#
+# Probes a database-bridging tool with classic SQLi payloads
+# (`'; DROP TABLE`, UNION SELECT, comment-bypass) and asserts the
+# server either rejects the input or returns a sanitised envelope —
+# never echoes back rows that look like a successful injection.
+version: 3
+metadata:
+  name: injection-sql
+  description: "Probes a DB-bridging tool with SQL-injection payloads."
+  authors: ["wallfacer-core"]
+  tags: [security, sql-injection]
+  parameters:
+    query_tool:
+      description: "Tool that takes a SQL fragment / query and returns rows."
+      type: string
+      default: "query_db"
+    query_field:
+      description: "Field name carrying the SQL string."
+      type: string
+      default: "query"
+    drop_table_pattern:
+      description: "Regex matching DROP TABLE / TRUNCATE acks the server should never confirm."
+      type: string
+      default: "(?i)\\b(?:dropped|truncated|table\\s+removed)\\b"
+
+invariants:
+  - name: "sqli.semicolon_drop_is_rejected_or_suppressed"
+    tool: "{{query_tool}}"
+    fixed:
+      "{{query_field}}": "1; DROP TABLE users; --"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: '{{drop_table_pattern}}'
+    test_fixtures:
+      - name: "passes when query rejected"
+        response: { isError: true, content: [{ type: "text", text: "syntax error" }] }
+        expect: pass
+      - name: "passes when no DROP confirmation"
+        response: { isError: false, content: [{ type: "text", text: "0 rows" }] }
+        expect: pass
+      - name: "fails when DROP confirmed"
+        response:
+          isError: false
+          content: [{ type: "text", text: "Table users dropped." }]
+        expect: fail
+
+  - name: "sqli.union_select_does_not_leak_password_column"
+    tool: "{{query_tool}}"
+    fixed:
+      "{{query_field}}": "1 UNION SELECT username, password FROM users--"
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "(?i)\\$2[aby]\\$|password\\s*[=:]\\s*['\"][^'\"]{4,}"
+    test_fixtures:
+      - name: "passes when no hash leaked"
+        response: { content: [{ type: "text", text: "rejected" }] }
+        expect: pass
+      - name: "fails when bcrypt hash leaks via UNION"
+        response:
+          content:
+            - { type: "text", text: "alice $2b$12$abcdefghijklmnopqrstuv" }
+        expect: fail
+
+  - name: "sqli.comment_bypass_does_not_alter_envelope_shape"
+    tool: "{{query_tool}}"
+    fixed:
+      "{{query_field}}": "SELECT * FROM users WHERE id = 1 -- AND active = 1"
+    assert:
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [content]
+    test_fixtures:
+      - name: "passes when envelope present"
+        response: { content: [{ type: "text", text: "1 row" }] }
+        expect: pass
+      - name: "fails when content key missing"
+        response: { isError: false }
+        expect: fail
+
+  - name: "sqli.error_messages_do_not_leak_table_names"
+    tool: "{{query_tool}}"
+    fixed:
+      "{{query_field}}": "INVALID SYNTAX"
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "(?i)(?:near\\s+\"[a-z_]+\"|column\\s+[a-z_]+\\.[a-z_]+\\s+does\\s+not\\s+exist)"
+    test_fixtures:
+      - name: "passes when error sanitised"
+        response: { content: [{ type: "text", text: "syntax error" }] }
+        expect: pass
+      - name: "fails when DB error reveals column name"
+        response:
+          content:
+            - { type: "text", text: "near \"users\": syntax error" }
+        expect: fail
+```

@@ -1,0 +1,179 @@
+# Pack — `pagination`
+
+> Validates limit / cursor / page metadata semantics on list tools.
+
+**Tags:** `reliability`, `api`
+**Authors:** wallfacer-core
+
+## Parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `items_path` | string | `structuredContent.items` | JSONPath to the items array on the response (relative to $.response). |
+| `next_cursor_path` | string | `structuredContent.next` | JSONPath to the next-page cursor / token (relative to $.response). Use a non-existent path if your tool doesn't have one. |
+| `paginate_tool` | string | `paginate` | Tool that returns paginated lists. |
+
+## Invariants
+
+### `pagination.limit_is_respected`
+
+- **Tool:** `paginate`
+- **Inputs:** generated (1 field(s))
+- **Assertion summary:** length_at_most(`$.response.structuredContent.items`)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `pagination.cursor_is_string_or_null`
+
+- **Tool:** `paginate`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `pagination.empty_page_returns_empty_array_not_null`
+
+- **Tool:** `paginate`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** is_type(`$.response.structuredContent.items`, array)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `pagination.items_are_consistent_type`
+
+- **Tool:** `paginate`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** for_each(`$.response.structuredContent.items[*]`, 1 child)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+## Source
+
+Raw YAML, embedded into the binary at compile time:
+
+```yaml
+# Pagination rule pack.
+#
+# Verifies the contract of list-style tools: limit honored, cursor
+# stable, page metadata not leaking server internals.
+version: 3
+metadata:
+  name: pagination
+  description: "Validates limit / cursor / page metadata semantics on list tools."
+  authors: ["wallfacer-core"]
+  tags: [reliability, api]
+  parameters:
+    paginate_tool:
+      description: "Tool that returns paginated lists."
+      type: string
+      default: "paginate"
+    items_path:
+      description: "JSONPath to the items array on the response (relative to $.response)."
+      type: string
+      default: "structuredContent.items"
+    next_cursor_path:
+      description: "JSONPath to the next-page cursor / token (relative to $.response). Use a non-existent path if your tool doesn't have one."
+      type: string
+      default: "structuredContent.next"
+
+invariants:
+  - name: "pagination.limit_is_respected"
+    tool: "{{paginate_tool}}"
+    generate:
+      limit:
+        type: integer
+        min: 1
+        max: 50
+    cases: 4
+    assert:
+      - kind: length_at_most
+        path: "$.response.{{items_path}}"
+        value: { path: "$.input.limit" }
+    test_fixtures:
+      - name: "passes when items <= limit"
+        input: { limit: 5 }
+        response:
+          structuredContent:
+            items: [1, 2, 3]
+        expect: pass
+      - name: "fails when items > limit"
+        input: { limit: 5 }
+        response:
+          structuredContent:
+            items: [1, 2, 3, 4, 5, 6]
+        expect: fail
+
+  - name: "pagination.cursor_is_string_or_null"
+    tool: "{{paginate_tool}}"
+    fixed:
+      limit: 10
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.{{next_cursor_path}}" }
+            rhs: { value: null }
+          - kind: is_type
+            path: "$.response.{{next_cursor_path}}"
+            type: string
+    test_fixtures:
+      - name: "passes when cursor is null"
+        response:
+          structuredContent: { items: [], next: null }
+        expect: pass
+      - name: "passes when cursor is string"
+        response:
+          structuredContent: { items: [], next: "page-2" }
+        expect: pass
+      - name: "fails when cursor is integer"
+        response:
+          structuredContent: { items: [], next: 42 }
+        expect: fail
+
+  - name: "pagination.empty_page_returns_empty_array_not_null"
+    tool: "{{paginate_tool}}"
+    fixed:
+      limit: 0
+    assert:
+      - kind: is_type
+        path: "$.response.{{items_path}}"
+        type: array
+    test_fixtures:
+      - name: "passes when empty array returned"
+        response:
+          structuredContent: { items: [] }
+        expect: pass
+      - name: "fails when null returned in place of array"
+        response:
+          structuredContent: { items: null }
+        expect: fail
+
+  - name: "pagination.items_are_consistent_type"
+    tool: "{{paginate_tool}}"
+    fixed:
+      limit: 5
+    assert:
+      - kind: for_each
+        path: "$.response.{{items_path}}[*]"
+        assert:
+          - kind: any_of
+            assert:
+              - kind: is_type
+                path: "$.item"
+                type: object
+              - kind: is_type
+                path: "$.item"
+                type: integer
+              - kind: is_type
+                path: "$.item"
+                type: string
+    test_fixtures:
+      - name: "passes when items are objects"
+        response:
+          structuredContent:
+            items:
+              - { id: 1 }
+              - { id: 2 }
+        expect: pass
+      - name: "fails when items mix booleans"
+        response:
+          structuredContent:
+            items: [1, true, 3]
+        expect: fail
+```

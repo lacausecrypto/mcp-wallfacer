@@ -1,0 +1,181 @@
+# Pack — `auth`
+
+> Runtime checks for authentication and authorization contracts.
+
+**Tags:** `security`, `auth`
+**Authors:** wallfacer-core
+
+## Parameters
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `admin_path_pattern` | string | `(?i)/admin(/\|$)` | Regex matching URIs that should never appear in a non-admin user's resource list. |
+| `bearer_witness_tool` | string | `echo` | A read-only tool used as a witness for bearer-echo testing. Pick one that does NOT legitimately echo input back. |
+| `get_user_tool` | string | `get_user` | Tool that fetches a user record by id. |
+| `list_resources_tool` | string | `list_resources` | Tool that lists resources the current user can access. |
+| `whoami_tool` | string | `whoami` | Tool that returns the current user identity. |
+
+## Invariants
+
+### `auth.unauthenticated_requests_are_rejected`
+
+- **Tool:** `whoami`
+- **Inputs:** fixed (0 field(s))
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `auth.bearer_tokens_never_echoed`
+
+- **Tool:** `echo`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `auth.role_based_listing_filters_admin_resources`
+
+- **Tool:** `list_resources`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** for_each(`$.response.structuredContent.resources[*]`, 1 child)
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `auth.session_cookies_are_never_returned_in_payloads`
+
+- **Tool:** `get_user`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+## Source
+
+Raw YAML, embedded into the binary at compile time:
+
+```yaml
+# Authentication & authorization rule pack.
+#
+# Loadable via: `wallfacer property --pack auth`.
+# Phase G — v3 with parameters: every tool name is overridable so the
+# pack works against any naming convention. Override either via CLI:
+#
+#   wallfacer property --pack auth --param whoami_tool=getCurrentUser
+#
+# or via `wallfacer.toml`:
+#
+#   [packs.auth]
+#   whoami_tool = "getCurrentUser"
+version: 3
+metadata:
+  name: auth
+  description: "Runtime checks for authentication and authorization contracts."
+  authors: ["wallfacer-core"]
+  tags: [security, auth]
+  parameters:
+    whoami_tool:
+      description: "Tool that returns the current user identity."
+      type: string
+      default: "whoami"
+    list_resources_tool:
+      description: "Tool that lists resources the current user can access."
+      type: string
+      default: "list_resources"
+    get_user_tool:
+      description: "Tool that fetches a user record by id."
+      type: string
+      default: "get_user"
+    bearer_witness_tool:
+      description: "A read-only tool used as a witness for bearer-echo testing. Pick one that does NOT legitimately echo input back."
+      type: string
+      default: "echo"
+    admin_path_pattern:
+      description: "Regex matching URIs that should never appear in a non-admin user's resource list."
+      type: string
+      default: "(?i)/admin(/|$)"
+
+invariants:
+  - name: "auth.unauthenticated_requests_are_rejected"
+    tool: "{{whoami_tool}}"
+    fixed: {}
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.anonymous" }
+            rhs: { value: true }
+    test_fixtures:
+      - name: "rejects via isError"
+        response: { isError: true }
+        expect: pass
+      - name: "rejects via anonymous flag"
+        response: { isError: false, structuredContent: { anonymous: true } }
+        expect: pass
+      - name: "fails when call succeeds without anonymous flag"
+        response: { isError: false, structuredContent: { user: "alice" } }
+        expect: fail
+
+  - name: "auth.bearer_tokens_never_echoed"
+    tool: "{{bearer_witness_tool}}"
+    fixed:
+      text: "Authorization: Bearer abc123"
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "Bearer\\s+[A-Za-z0-9\\.-_]+"
+    test_fixtures:
+      - name: "passes when bearer not echoed"
+        response: { content: [{ type: "text", text: "ok" }] }
+        expect: pass
+      - name: "fails when bearer is echoed verbatim"
+        response: { content: [{ type: "text", text: "Bearer abc123def456" }] }
+        expect: fail
+
+  - name: "auth.role_based_listing_filters_admin_resources"
+    tool: "{{list_resources_tool}}"
+    fixed:
+      role: "user"
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.resources[*]"
+        assert:
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.item.uri"
+              pattern: '{{admin_path_pattern}}'
+    test_fixtures:
+      - name: "passes with non-admin uris"
+        response:
+          structuredContent:
+            resources:
+              - { uri: "/users/1" }
+              - { uri: "/files/report.pdf" }
+        expect: pass
+      - name: "fails when admin uri leaks"
+        response:
+          structuredContent:
+            resources:
+              - { uri: "/users/1" }
+              - { uri: "/admin/users" }
+        expect: fail
+
+  - name: "auth.session_cookies_are_never_returned_in_payloads"
+    tool: "{{get_user_tool}}"
+    fixed:
+      id: "1"
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "(?i)session(_id|=)"
+    test_fixtures:
+      - name: "passes without session reference"
+        response: { content: [{ type: "text", text: "user info: alice" }] }
+        expect: pass
+      - name: "fails when session_id leaks"
+        response: { content: [{ type: "text", text: "session_id=abc123" }] }
+        expect: fail
+```
