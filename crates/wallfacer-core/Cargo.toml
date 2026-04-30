@@ -9,6 +9,8 @@ license.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 http = "1"
+rand = "0.10"
+rand_chacha = "0.10"
 rmcp = { version = "1.5", default-features = false, features = [
     "client",
     "transport-child-process",

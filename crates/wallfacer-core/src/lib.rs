@@ -1,5 +1,8 @@
 pub mod client;
+pub mod corpus;
 pub mod finding;
+pub mod mutate;
+pub mod seed;
 pub mod target;
 
 #[cfg(test)]

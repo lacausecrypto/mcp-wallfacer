@@ -14,6 +14,10 @@ wallfacer-core = { path = "../wallfacer-core" }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 comfy-table = "7"
+indicatif = "0.18"
+rand = "0.10"
+rand_chacha = "0.10"
+serde_json = "1"
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -25,3 +29,7 @@ predicates = "3"
 [[test]]
 name = "doctor_lists_tools"
 path = "../../tests/e2e/doctor_lists_tools.rs"
+
+[[test]]
+name = "fuzz_finds_crash"
+path = "../../tests/e2e/fuzz_finds_crash.rs"

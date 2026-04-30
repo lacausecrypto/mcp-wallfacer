@@ -21,6 +21,7 @@ struct Cli {
 enum Command {
     Init(commands::init::InitArgs),
     Doctor(commands::doctor::DoctorArgs),
+    Fuzz(commands::fuzz::FuzzArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Init(args)) => commands::init::run(args).await,
         Some(Command::Doctor(args)) => commands::doctor::run(args, cli.config.as_deref()).await,
+        Some(Command::Fuzz(args)) => commands::fuzz::run(args, cli.config.as_deref()).await,
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())
