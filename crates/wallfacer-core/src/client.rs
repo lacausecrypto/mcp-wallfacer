@@ -53,7 +53,7 @@ pub enum ClientError {
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-/// Cheaply-clonable MCP client. Cloning shares the same underlying
+/// Cheaply-cloneable MCP client. Cloning shares the same underlying
 /// transport via `Arc`. After [`Client::shutdown`] the transport is gone
 /// and further calls return `ClientError::Request`.
 #[derive(Clone)]

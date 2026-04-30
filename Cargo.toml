@@ -62,3 +62,7 @@ unwrap_used = "warn"
 expect_used = "warn"
 unwrap_in_result = "warn"
 panic = "warn"
+# `uninlined_format_args` is `warn-by-default` on Rust 1.88's clippy but
+# `allow-by-default` on 1.94+. Pinning it to `allow` keeps `-D warnings`
+# consistent across the MSRV matrix.
+uninlined_format_args = "allow"
