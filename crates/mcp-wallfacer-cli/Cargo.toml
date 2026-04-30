@@ -1,0 +1,22 @@
+[package]
+name = "mcp-wallfacer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wallfacer"
+path = "src/main.rs"
+
+[dependencies]
+wallfacer-core = { path = "../wallfacer-core" }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
