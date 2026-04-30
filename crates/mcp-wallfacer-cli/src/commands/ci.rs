@@ -2,16 +2,16 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use jsonschema::validator_for;
 use wallfacer_core::{
-    client::{CallOutcome, Client},
+    client::Client,
     corpus::Corpus,
-    differential::{boundary_payload, response_value},
-    finding::{Finding, FindingKind, ReproInfo, Severity},
-    sarif,
+    differential::inferred_schema_dir,
+    finding::Severity,
+    run::{DifferentialPlan, DifferentialReport, Reporter},
     target::Config,
 };
+
+use crate::reporters::{HumanReporter, JsonReporter, SarifReporter};
 
 #[derive(Debug, Args)]
 pub struct CiArgs {
@@ -38,110 +38,6 @@ pub enum SeverityThreshold {
     Critical,
 }
 
-pub async fn run(args: CiArgs, config_path: Option<&Path>) -> Result<()> {
-    let (_path, config) = Config::load_from_lookup(config_path).context("failed to load config")?;
-    let findings = run_schema_pass(&config).await?;
-    let corpus = Corpus::new(config.output.corpus_dir.clone());
-    for finding in &findings {
-        corpus.write_finding(finding)?;
-    }
-
-    print_findings(&findings, args.format)?;
-
-    let threshold = args.severity_threshold.into();
-    if findings.iter().any(|finding| finding.severity >= threshold) {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-async fn run_schema_pass(config: &Config) -> Result<Vec<Finding>> {
-    let client = Client::connect(&config.target)
-        .await
-        .context("failed to connect to MCP target")?;
-    let tools = client.list_tools().await.context("failed to list tools")?;
-    let mut findings = Vec::new();
-
-    for tool in tools {
-        let Some(schema) = &tool.output_schema else {
-            continue;
-        };
-        let schema = serde_json::Value::Object((**schema).clone());
-        let validator = validator_for(&schema)
-            .with_context(|| format!("invalid output schema for tool `{}`", tool.name))?;
-        let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
-        let payload = boundary_payload(&input_schema);
-        let seed = 0;
-
-        let outcome = client
-            .call_tool(
-                tool.name.as_ref(),
-                payload.clone(),
-                Duration::from_millis(config.target.timeout_ms),
-            )
-            .await;
-
-        let CallOutcome::Ok(result) = outcome else {
-            continue;
-        };
-        if result.is_error == Some(true) {
-            continue;
-        }
-
-        let response = response_value(&result);
-        let errors = validator
-            .iter_errors(&response)
-            .map(|error| format!("{} at instance path {}", error, error.instance_path()))
-            .collect::<Vec<_>>();
-
-        if !errors.is_empty() {
-            findings.push(Finding::new(
-                FindingKind::SchemaViolation,
-                tool.name.to_string(),
-                "tool response does not match output schema",
-                format!(
-                    "{}\nobserved: {}",
-                    errors.join("\n"),
-                    serde_json::to_string_pretty(&response)?
-                ),
-                ReproInfo {
-                    seed,
-                    tool_call: payload,
-                    transport: config.target.transport_name().to_string(),
-                },
-            ));
-        }
-    }
-
-    client.shutdown().await.ok();
-    Ok(findings)
-}
-
-fn print_findings(findings: &[Finding], format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(findings)?),
-        OutputFormat::Sarif => println!(
-            "{}",
-            serde_json::to_string_pretty(&sarif::to_sarif(findings, env!("CARGO_PKG_VERSION")))?
-        ),
-        OutputFormat::Human => {
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Tool", "Kind", "Severity", "Message"]);
-            for finding in findings {
-                table.add_row(vec![
-                    Cell::new(&finding.tool),
-                    Cell::new(format!("{:?}", finding.kind)),
-                    Cell::new(format!("{:?}", finding.severity)),
-                    Cell::new(&finding.message),
-                ]);
-            }
-            println!("{table}");
-        }
-    }
-    Ok(())
-}
-
 impl From<SeverityThreshold> for Severity {
     fn from(value: SeverityThreshold) -> Self {
         match value {
@@ -151,4 +47,42 @@ impl From<SeverityThreshold> for Severity {
             SeverityThreshold::Critical => Severity::Critical,
         }
     }
+}
+
+pub async fn run(args: CiArgs, config_path: Option<&Path>) -> Result<()> {
+    let (_path, config) = Config::load_from_lookup(config_path).context("failed to load config")?;
+    let corpus = Corpus::from_config(&config.output);
+    let mut client = Client::connect(&config.target)
+        .await
+        .context("failed to connect to MCP target")?;
+
+    // CI runs a single boundary-payload differential pass: it's the cheapest
+    // and most deterministic check, suitable for branch protection rules.
+    let plan = DifferentialPlan {
+        learn: false,
+        iterations: 1,
+        master_seed: 0,
+        schema_dir: inferred_schema_dir(),
+        timeout: Duration::from_millis(config.target.timeout_ms),
+        transport_name: config.target.transport_name().to_string(),
+    };
+
+    let mut reporter: Box<dyn Reporter> = match args.format {
+        OutputFormat::Human => Box::new(HumanReporter::new()),
+        OutputFormat::Json => Box::new(JsonReporter::new()),
+        OutputFormat::Sarif => Box::new(SarifReporter::new()),
+    };
+    let report: DifferentialReport = plan
+        .execute(&mut client, &corpus, reporter.as_mut())
+        .await?;
+    client.shutdown().await.ok();
+
+    let threshold: Severity = args.severity_threshold.into();
+    if report
+        .max_severity
+        .is_some_and(|severity| severity >= threshold)
+    {
+        std::process::exit(1);
+    }
+    Ok(())
 }

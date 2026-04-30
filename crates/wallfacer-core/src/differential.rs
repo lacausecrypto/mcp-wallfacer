@@ -39,7 +39,8 @@ pub fn save_schema(dir: &Path, tool_name: &str, schema: &Value) -> Result<PathBu
     })?;
 
     let path = schema_path(dir, tool_name);
-    let body = serde_json::to_string_pretty(schema).expect("schema JSON serialization");
+    // `serde_json::to_string_pretty` on a `Value` is infallible.
+    let body = serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_string());
     fs::write(&path, body).map_err(|source| DifferentialError::Write {
         path: path.clone(),
         source,
@@ -65,10 +66,11 @@ pub fn load_schema(dir: &Path, tool_name: &str) -> Result<Option<Value>> {
 }
 
 pub fn response_value(result: &rmcp::model::CallToolResult) -> Value {
-    result
-        .structured_content
-        .clone()
-        .unwrap_or_else(|| serde_json::to_value(result).expect("CallToolResult serialization"))
+    result.structured_content.clone().unwrap_or_else(|| {
+        // `CallToolResult` is fully `Serialize`; fall back to `Null` if a future
+        // SDK revision introduces an un-serializable field rather than panicking.
+        serde_json::to_value(result).unwrap_or(Value::Null)
+    })
 }
 
 pub fn boundary_payload(schema: &Value) -> Value {

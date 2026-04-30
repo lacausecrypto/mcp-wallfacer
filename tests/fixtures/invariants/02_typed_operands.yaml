@@ -1,0 +1,49 @@
+# Phase D D2: explicit `{path: ...}` and `{value: ...}` operands.
+# The legacy `lhs: "$.x"` form keeps working — these examples make the
+# resolution rule unambiguous when an operand happens to be a plain string
+# that *isn't* a path.
+version: 2
+invariants:
+  - name: "literal-string equality (no $ leak)"
+    tool: status
+    fixed: {}
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.status" }
+        rhs: { value: "ready" }
+
+  - name: "literal numeric upper bound"
+    tool: list_users
+    fixed: {}
+    assert:
+      - kind: length_at_most
+        path: "$.response.structuredContent.users"
+        value: { value: 100 }
+
+  - name: "path vs path comparison"
+    tool: rename
+    fixed:
+      old_name: "alpha"
+      new_name: "beta"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.structuredContent.name" }
+        rhs: { path: "$.input.new_name" }
+
+  - name: "explicit literal compared with explicit path"
+    tool: increment
+    fixed:
+      delta: 7
+    assert:
+      - kind: at_least
+        path: "$.response.structuredContent.value"
+        value: { path: "$.input.delta" }
+
+  - name: "boolean literal kept as a literal"
+    tool: validate_email
+    fixed:
+      email: "alice@example.org"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.structuredContent.valid" }
+        rhs: { value: true }

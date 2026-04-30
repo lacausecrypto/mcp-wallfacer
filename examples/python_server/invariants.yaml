@@ -1,0 +1,14 @@
+# Invariants exercising the example server's `paginate` tool. Triggers
+# `FindingKind::PropertyFailure` on the bad calls (when the server returns
+# limit+1 items).
+version: 2
+invariants:
+  - name: "paginate respects limit"
+    tool: paginate
+    generate:
+      limit: { type: integer, min: 1, max: 50 }
+    cases: 4
+    assert:
+      - kind: length_at_most
+        path: "$.response.structuredContent.items"
+        value: { path: "$.input.limit" }

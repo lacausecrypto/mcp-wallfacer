@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
 use serde_json::Value;
@@ -41,8 +43,8 @@ fn differential_learns_then_reports_schema_violations() {
         .stdout
         .clone();
 
-    let findings: Value = serde_json::from_slice(&output).expect("valid findings JSON");
-    let findings = findings.as_array().expect("findings array");
+    let report: Value = serde_json::from_slice(&output).expect("valid findings JSON");
+    let findings = report["findings"].as_array().expect("findings array");
     assert_eq!(findings.len(), 3, "expected exactly 3 schema violations");
     assert!(findings.iter().all(|finding| {
         finding["kind"]["type"]

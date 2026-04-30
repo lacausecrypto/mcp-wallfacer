@@ -40,6 +40,12 @@ pub struct ReproInfo {
     pub seed: u64,
     pub tool_call: Value,
     pub transport: String,
+    /// Human-readable trail of composition choices made when generating this
+    /// payload (e.g. `oneOf[2/3]`, `allOf merged 2 schemas`). Empty / absent
+    /// when the schema had no composition keywords. Not part of the finding
+    /// id: a deterministic seed reproduces the same trail.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composition_trail: Vec<String>,
 }
 
 impl Finding {
@@ -88,7 +94,10 @@ pub fn finding_id(tool: &str, kind: &FindingKind, tool_call: &Value) -> String {
 }
 
 pub fn canonical_json(value: &Value) -> String {
-    serde_json::to_string(&canonicalize(value)).expect("canonical JSON serialization")
+    // Serializing a `serde_json::Value` cannot fail: the type only holds
+    // representable JSON. A failure here is unreachable; falling back to the
+    // empty object keeps `finding_id` stable rather than panicking.
+    serde_json::to_string(&canonicalize(value)).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn canonicalize(value: &Value) -> Value {

@@ -1,0 +1,63 @@
+# Error-envelope rule pack.
+#
+# Validates that a server's error responses follow a predictable shape:
+# `isError: true` with at least one human-readable text content. This
+# matters for clients that branch on `isError` rather than attempting to
+# parse free-form prose.
+# Loadable via: `wallfacer property --pack error-shape`.
+version: 2
+invariants:
+  - name: "error.divide_by_zero_envelope"
+    tool: divide
+    fixed:
+      a: 1
+      b: 0
+    assert:
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [isError, content]
+          properties:
+            isError: { type: boolean, enum: [true] }
+            content:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [type, text]
+                properties:
+                  type: { type: string, enum: [text] }
+                  text: { type: string, minLength: 1 }
+
+  - name: "error.unknown_tool_returns_envelope_not_panic"
+    tool: this_tool_does_not_exist
+    fixed: {}
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+
+  - name: "error.text_messages_never_carry_internal_paths"
+    tool: divide
+    fixed:
+      a: 1
+      b: 0
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "(?:/Users/|/home/|C:\\\\\\\\)"
+
+  - name: "error.text_messages_never_carry_stack_traces"
+    tool: divide
+    fixed:
+      a: 1
+      b: 0
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "Traceback \\(most recent call last\\)|^\\s*at\\s+[A-Za-z0-9_<>$.]+\\("

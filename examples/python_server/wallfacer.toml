@@ -1,0 +1,14 @@
+[target]
+kind = "stdio"
+command = "python3"
+args = ["server.py"]
+timeout_ms = 2000
+
+[output]
+corpus_dir = ".wallfacer/corpus"
+
+# `crashes_now` keyword would be classified destructive by the default
+# detector. We allow it explicitly so the example exercises crash
+# detection rather than being filtered out before fuzzing.
+[allow_destructive]
+tools = ["^crashes_now$"]

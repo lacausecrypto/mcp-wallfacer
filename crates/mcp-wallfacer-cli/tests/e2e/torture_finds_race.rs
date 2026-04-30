@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use std::time::Duration;
@@ -32,9 +34,9 @@ fn torture_finds_counter_race_and_state_leak() {
         .stdout
         .clone();
 
-    let race_findings: Value = serde_json::from_slice(&race_output).expect("race JSON");
+    let race_report: Value = serde_json::from_slice(&race_output).expect("race JSON");
     assert!(
-        race_findings
+        race_report["findings"]
             .as_array()
             .is_some_and(|findings| !findings.is_empty()),
         "expected at least one race finding"
@@ -59,6 +61,6 @@ fn torture_finds_counter_race_and_state_leak() {
         .stdout
         .clone();
 
-    let leak_findings: Value = serde_json::from_slice(&leak_output).expect("leak JSON");
-    assert_eq!(leak_findings[0]["kind"]["type"], "state_leak");
+    let leak_report: Value = serde_json::from_slice(&leak_output).expect("leak JSON");
+    assert_eq!(leak_report["findings"][0]["kind"]["type"], "state_leak");
 }

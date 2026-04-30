@@ -1,4 +1,19 @@
-use std::{collections::HashMap, future::Future, path::Path, process::Stdio, time::Duration};
+//! MCP client wrapper.
+//!
+//! Phase E1 puts the underlying `rmcp` service behind an
+//! `Arc<RwLock<...>>` so:
+//!
+//! * `Client` is `Clone` (cheap `Arc::clone`); torture can fan out across
+//!   many tasks sharing the same connection.
+//! * `list_tools` and `call_tool` take `&self` and acquire a *read* lock,
+//!   allowing concurrent calls to be in flight at once.
+//! * `reconnect` takes `&self` and acquires a *write* lock to atomically
+//!   tear down and rebuild the underlying service. Concurrent callers see
+//!   either the old or the new transport, never a torn state.
+
+use std::{
+    collections::HashMap, future::Future, path::Path, process::Stdio, sync::Arc, time::Duration,
+};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
@@ -14,6 +29,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
+    sync::RwLock,
     time,
 };
 
@@ -37,8 +53,15 @@ pub enum ClientError {
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
+/// Cheaply-clonable MCP client. Cloning shares the same underlying
+/// transport via `Arc`. After [`Client::shutdown`] the transport is gone
+/// and further calls return `ClientError::Request`.
+#[derive(Clone)]
 pub struct Client {
-    service: RunningService<RoleClient, ()>,
+    /// `Some` while the transport is live; `None` after `shutdown`.
+    /// `RwLock` allows concurrent `&self` calls (read) and exclusive
+    /// `reconnect` (write).
+    service: Arc<RwLock<Option<RunningService<RoleClient, ()>>>>,
     target: Target,
 }
 
@@ -52,55 +75,58 @@ pub enum CallOutcome {
 
 impl Client {
     pub async fn connect(target: &Target) -> Result<Self> {
-        let service = match &target.transport {
-            TargetTransport::Stdio { command, args, env } => {
-                let mut process = Command::new(command);
-                process.args(args).envs(env);
-                let transport = StdioChildTransport::spawn(process).map_err(ClientError::Spawn)?;
-                ().serve(transport)
-                    .await
-                    .map_err(|error| ClientError::Initialize(error.to_string()))?
-            }
-            TargetTransport::Http { url, headers } => {
-                let headers = header_map(headers)?;
-                let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                    .custom_headers(headers);
-                let transport = StreamableHttpClientTransport::from_config(config);
-                ().serve(transport)
-                    .await
-                    .map_err(|error| ClientError::Initialize(error.to_string()))?
-            }
-        };
-
+        let service = build_service(target).await?;
         Ok(Self {
-            service,
+            service: Arc::new(RwLock::new(Some(service))),
             target: target.clone(),
         })
     }
 
-    pub async fn reconnect(&mut self) -> Result<()> {
-        let target = self.target.clone();
-        let _ = self.service.close().await;
-        *self = Self::connect(&target).await?;
+    /// Tears down the current transport and opens a new one. Other tasks
+    /// holding a `&self` reference will see the new transport on their
+    /// next call. Phase E1 changed this from `&mut self` to `&self` so
+    /// callers can recover after a fault without exclusive ownership of
+    /// the `Client`.
+    pub async fn reconnect(&self) -> Result<()> {
+        // Build the replacement *before* dropping the old one to keep the
+        // window where the client has no transport as small as possible.
+        let replacement = build_service(&self.target).await?;
+        let mut guard = self.service.write().await;
+        if let Some(old) = guard.take() {
+            let _ = old.cancel().await;
+        }
+        *guard = Some(replacement);
         Ok(())
     }
 
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
-        self.service
+        let guard = self.service.read().await;
+        let service = guard
+            .as_ref()
+            .ok_or_else(|| ClientError::Request("client has been shut down".into()))?;
+        service
             .list_all_tools()
             .await
             .map_err(|error| ClientError::Request(error.to_string()))
     }
 
     pub async fn list_resources(&self) -> Result<Vec<Resource>> {
-        self.service
+        let guard = self.service.read().await;
+        let service = guard
+            .as_ref()
+            .ok_or_else(|| ClientError::Request("client has been shut down".into()))?;
+        service
             .list_all_resources()
             .await
             .map_err(|error| ClientError::Request(error.to_string()))
     }
 
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
-        self.service
+        let guard = self.service.read().await;
+        let service = guard
+            .as_ref()
+            .ok_or_else(|| ClientError::Request("client has been shut down".into()))?;
+        service
             .list_all_prompts()
             .await
             .map_err(|error| ClientError::Request(error.to_string()))
@@ -124,9 +150,16 @@ impl Client {
             None => CallToolRequestParams::new(name.to_owned()),
         };
 
-        match time::timeout(timeout, self.service.call_tool(request)).await {
+        // Snapshot the current transport for the duration of the call. We
+        // hold the read lock across the await so a concurrent reconnect
+        // waits until our call finishes before swapping.
+        let guard = self.service.read().await;
+        let Some(service) = guard.as_ref() else {
+            return CallOutcome::ProtocolError("client has been shut down".into());
+        };
+        match time::timeout(timeout, service.call_tool(request)).await {
             Ok(Ok(result)) => CallOutcome::Ok(result),
-            Ok(Err(error)) if self.service.is_transport_closed() => {
+            Ok(Err(error)) if service.is_transport_closed() => {
                 CallOutcome::Crash(error.to_string())
             }
             Ok(Err(error)) => CallOutcome::ProtocolError(error.to_string()),
@@ -134,17 +167,47 @@ impl Client {
         }
     }
 
-    pub async fn shutdown(self) -> Result<()> {
-        self.service
-            .cancel()
-            .await
-            .map(|_| ())
-            .map_err(ClientError::Shutdown)
+    /// Shuts the underlying transport down. After this call other clones of
+    /// this `Client` keep working semantically but return `ProtocolError`
+    /// on every method (the transport is gone).
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut guard = self.service.write().await;
+        match guard.take() {
+            Some(service) => service
+                .cancel()
+                .await
+                .map(|_| ())
+                .map_err(ClientError::Shutdown),
+            None => Ok(()),
+        }
     }
 
     pub fn target(&self) -> &Target {
         &self.target
     }
+}
+
+async fn build_service(target: &Target) -> Result<RunningService<RoleClient, ()>> {
+    let service = match &target.transport {
+        TargetTransport::Stdio { command, args, env } => {
+            let mut process = Command::new(command);
+            process.args(args).envs(env);
+            let transport = StdioChildTransport::spawn(process).map_err(ClientError::Spawn)?;
+            ().serve(transport)
+                .await
+                .map_err(|error| ClientError::Initialize(error.to_string()))?
+        }
+        TargetTransport::Http { url, headers } => {
+            let headers = header_map(headers)?;
+            let config =
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
+            let transport = StreamableHttpClientTransport::from_config(config);
+            ().serve(transport)
+                .await
+                .map_err(|error| ClientError::Initialize(error.to_string()))?
+        }
+    };
+    Ok(service)
 }
 
 pub fn fixture_config_path(repo_root: &Path) -> std::path::PathBuf {

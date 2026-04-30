@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
 use std::time::Duration;

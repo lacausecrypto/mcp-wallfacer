@@ -1,0 +1,117 @@
+# Phase D D1: boolean combinators all_of / any_of / not.
+version: 2
+invariants:
+  - name: "all_of: response is well-formed and within bounds"
+    tool: query
+    fixed: { sql: "SELECT 1" }
+    assert:
+      - kind: all_of
+        assert:
+          - kind: is_type
+            path: "$.response.structuredContent.rows"
+            type: array
+          - kind: length_at_most
+            path: "$.response.structuredContent.rows"
+            value: { value: 1000 }
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: false }
+
+  - name: "any_of: status is one of the known states"
+    tool: job_status
+    fixed: { id: "job-1" }
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.state" }
+            rhs: { value: "queued" }
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.state" }
+            rhs: { value: "running" }
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.state" }
+            rhs: { value: "completed" }
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.state" }
+            rhs: { value: "failed" }
+
+  - name: "not: never echoes the secret back"
+    tool: format_token
+    fixed: { token: "<wallfacer-secret>" }
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "<wallfacer-secret>"
+
+  - name: "all_of nested with not: no error AND not empty"
+    tool: search
+    fixed: { q: "rust" }
+    assert:
+      - kind: all_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: false }
+          - kind: not
+            assertion:
+              kind: length_eq
+              path: "$.response.structuredContent.hits"
+              value: { value: 0 }
+
+  - name: "any_of nested under all_of: well-formed AND interesting"
+    tool: classify
+    fixed: { text: "hello" }
+    assert:
+      - kind: all_of
+        assert:
+          - kind: is_type
+            path: "$.response.structuredContent.label"
+            type: string
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.structuredContent.label" }
+                rhs: { value: "positive" }
+              - kind: equals
+                lhs: { path: "$.response.structuredContent.label" }
+                rhs: { value: "negative" }
+              - kind: equals
+                lhs: { path: "$.response.structuredContent.label" }
+                rhs: { value: "neutral" }
+
+  - name: "double negation: confidence is bounded"
+    tool: classify
+    fixed: { text: "hello" }
+    assert:
+      - kind: not
+        assertion:
+          kind: not
+          assertion:
+            kind: at_most
+            path: "$.response.structuredContent.confidence"
+            value: { value: 1 }
+
+  - name: "any_of guarding alternative response shapes"
+    tool: lookup
+    fixed: { id: "x" }
+    assert:
+      - kind: any_of
+        assert:
+          - kind: matches_schema
+            path: "$.response.structuredContent"
+            schema:
+              type: object
+              required: [found]
+              properties:
+                found: { type: boolean, enum: [false] }
+          - kind: matches_schema
+            path: "$.response.structuredContent"
+            schema:
+              type: object
+              required: [found, value]
+              properties:
+                found: { type: boolean, enum: [true] }
+                value: { type: string }

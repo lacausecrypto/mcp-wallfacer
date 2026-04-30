@@ -1,23 +1,26 @@
-use std::{fs, path::Path, time::Duration};
+use std::{fs, path::Path, path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
-use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
-use serde_json::{json, Value};
 use wallfacer_core::{
-    client::{CallOutcome, Client},
+    client::Client,
     corpus::Corpus,
-    finding::{Finding, FindingKind, ReproInfo},
-    property::{dsl, runner},
-    seed::derive_seed,
+    run::{parse_invariants, PropertyPlan, Reporter},
     target::Config,
 };
 
+use crate::reporters::{HumanReporter, JsonReporter};
+
 #[derive(Debug, Args)]
 pub struct PropertyArgs {
-    pub invariants: std::path::PathBuf,
+    /// Path to a YAML invariants file. Either `invariants` or `--pack`
+    /// must be supplied.
+    pub invariants: Option<PathBuf>,
+    /// Name of a built-in rule pack (`auth`, `path-traversal`,
+    /// `error-shape`). Resolved against `packs/` next to the
+    /// `wallfacer.toml` (workspace root).
+    #[arg(long)]
+    pub pack: Option<String>,
     #[arg(long)]
     pub seed: Option<u64>,
     #[arg(long, default_value_t = 100)]
@@ -33,123 +36,81 @@ pub enum OutputFormat {
 }
 
 pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
-    let (_path, config) = Config::load_from_lookup(config_path).context("failed to load config")?;
-    let source = fs::read_to_string(&args.invariants).with_context(|| {
-        format!(
-            "failed to read invariants file {}",
-            args.invariants.display()
-        )
-    })?;
-    let file = dsl::parse(&source).context("failed to parse invariants")?;
-    if file.version != 1 {
-        bail!("unsupported invariants version {}", file.version);
-    }
+    let (config_file, config) =
+        Config::load_from_lookup(config_path).context("failed to load config")?;
+    let source = load_invariants_source(&args, &config_file)?;
+    let file = parse_invariants(&source)?;
 
-    let corpus = Corpus::new(config.output.corpus_dir.clone());
+    let corpus = Corpus::from_config(&config.output);
     let mut client = Client::connect(&config.target)
         .await
         .context("failed to connect to MCP target")?;
-    let master_seed = args.seed.unwrap_or_else(rand::random);
-    let mut findings = Vec::new();
 
-    for invariant in &file.invariants {
-        let cases = invariant.cases.unwrap_or(args.cases).max(1);
+    let plan = PropertyPlan {
+        file,
+        default_cases: args.cases,
+        master_seed: args.seed.unwrap_or_else(rand::random),
+        timeout: Duration::from_millis(config.target.timeout_ms),
+        transport_name: config.target.transport_name().to_string(),
+    };
 
-        for case_index in 0..cases {
-            let seed = derive_seed(master_seed, &invariant.name, case_index as u64);
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let input = runner::input_for_case(invariant, case_index, &mut rng);
-            let response = call_for_property(
-                &mut client,
-                &invariant.tool,
-                input.clone(),
-                Duration::from_millis(config.target.timeout_ms),
-            )
-            .await?;
-
-            if let Err(error) = runner::evaluate(invariant, input.clone(), response.clone()) {
-                let finding = Finding::new(
-                    FindingKind::PropertyFailure {
-                        invariant: invariant.name.clone(),
-                    },
-                    invariant.tool.clone(),
-                    "property invariant failed",
-                    format!(
-                        "{error}\ninput: {}\nresponse: {}",
-                        serde_json::to_string_pretty(&input)?,
-                        serde_json::to_string_pretty(&response)?
-                    ),
-                    ReproInfo {
-                        seed,
-                        tool_call: input,
-                        transport: config.target.transport_name().to_string(),
-                    },
-                );
-                corpus.write_finding(&finding)?;
-                findings.push(finding);
-                break;
-            }
-        }
-    }
-
+    let mut reporter: Box<dyn Reporter> = match args.format {
+        OutputFormat::Human => Box::new(HumanReporter::new()),
+        OutputFormat::Json => Box::new(JsonReporter::new()),
+    };
+    let report = plan
+        .execute(&mut client, &corpus, reporter.as_mut())
+        .await?;
     client.shutdown().await.ok();
-    print_findings(&findings, args.format)?;
-    if findings.is_empty() {
+
+    if report.findings_count == 0 {
         Ok(())
     } else {
         std::process::exit(1);
     }
 }
 
-async fn call_for_property(
-    client: &mut Client,
-    tool: &str,
-    input: Value,
-    timeout: Duration,
-) -> Result<Value> {
-    match client.call_tool(tool, input, timeout).await {
-        CallOutcome::Ok(result) => Ok(serde_json::to_value(result)?),
-        CallOutcome::Hang(duration) => {
-            client.reconnect().await.ok();
-            Ok(json!({
-                "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-                "isError": true
-            }))
+/// Resolves the YAML source for the run, honoring `--pack` when supplied.
+///
+/// `--pack <name>` looks under `<workspace>/packs/<name>.yaml` next to the
+/// detected `wallfacer.toml`. We prefer that location so each project can
+/// vendor its own packs without depending on a system-wide install.
+fn load_invariants_source(args: &PropertyArgs, config_file: &Path) -> Result<String> {
+    match (&args.invariants, &args.pack) {
+        (Some(_), Some(_)) => {
+            bail!("pass either an invariants file or `--pack <name>`, not both")
         }
-        CallOutcome::Crash(reason) => {
-            client.reconnect().await.ok();
-            Ok(json!({
-                "content": [{"type": "text", "text": reason}],
-                "isError": true
-            }))
-        }
-        CallOutcome::ProtocolError(message) => {
-            client.reconnect().await.ok();
-            Ok(json!({
-                "content": [{"type": "text", "text": message}],
-                "isError": true
-            }))
-        }
+        (None, None) => bail!("pass an invariants file or `--pack <name>`"),
+        (Some(path), None) => fs::read_to_string(path)
+            .with_context(|| format!("failed to read invariants file {}", path.display())),
+        (None, Some(name)) => load_pack(config_file, name),
     }
 }
 
-fn print_findings(findings: &[Finding], format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(findings)?),
-        OutputFormat::Human => {
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Tool", "Kind", "Severity", "Message"]);
-            for finding in findings {
-                table.add_row(vec![
-                    Cell::new(&finding.tool),
-                    Cell::new(format!("{:?}", finding.kind)),
-                    Cell::new(format!("{:?}", finding.severity)),
-                    Cell::new(&finding.message),
-                ]);
-            }
-            println!("{table}");
+fn load_pack(config_file: &Path, name: &str) -> Result<String> {
+    if name.contains('/') || name.contains('\\') {
+        bail!("`--pack <name>` must not contain path separators (got `{name}`)");
+    }
+    let workspace = config_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let candidates = [
+        workspace.join("packs").join(format!("{name}.yaml")),
+        workspace.join("packs").join(format!("{name}.yml")),
+    ];
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return fs::read_to_string(candidate)
+                .with_context(|| format!("failed to read pack {}", candidate.display()));
         }
     }
-    Ok(())
+    bail!(
+        "rule pack `{name}` not found; expected one of: {}",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }

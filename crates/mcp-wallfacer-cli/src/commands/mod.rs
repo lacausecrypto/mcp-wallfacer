@@ -1,8 +1,10 @@
 pub mod ci;
 pub mod corpus;
+pub mod diff;
 pub mod differential;
 pub mod doctor;
 pub mod fuzz;
 pub mod init;
 pub mod property;
+pub mod replay;
 pub mod torture;

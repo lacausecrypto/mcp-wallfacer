@@ -1,0 +1,21 @@
+# typos configuration. https://github.com/crate-ci/typos
+[default]
+extend-ignore-re = [
+    # Hex hashes / SHA256 fragments embedded in tests or fixtures.
+    "[0-9a-f]{16,}",
+]
+
+[default.extend-words]
+# Project-specific terms typos should not "correct".
+crate = "crate"
+clippy = "clippy"
+rmcp = "rmcp"
+wallfacer = "wallfacer"
+
+[files]
+extend-exclude = [
+    "Cargo.lock",
+    "out.sarif",
+    ".wallfacer/**",
+    "target/**",
+]

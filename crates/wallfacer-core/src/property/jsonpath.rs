@@ -1,109 +1,100 @@
+//! Thin façade over [`serde_json_path`] (RFC 9535) preserving the legacy
+//! `resolve` / `resolve_one` API used by the property runner.
+//!
+//! Phase B1: this module no longer parses paths itself. We delegate to the
+//! `serde_json_path` crate and just adapt the result types and errors.
+
 use serde_json::Value;
 use thiserror::Error;
 
+/// Errors returned by path resolution.
 #[derive(Debug, Error)]
 pub enum JsonPathError {
-    #[error("JSONPath must start with `$`: {0}")]
-    InvalidRoot(String),
-    #[error("invalid JSONPath segment near `{0}`")]
-    InvalidSegment(String),
-    #[error("path segment `{0}` did not resolve")]
+    /// The path string is not valid RFC 9535 JSONPath syntax.
+    #[error("invalid JSONPath `{path}`: {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: serde_json_path::ParseError,
+    },
+    /// The path parsed successfully but resolved to nothing in the document.
+    #[error("path `{0}` did not resolve to any value")]
     Missing(String),
-    #[error("wildcard is only supported as the final segment")]
-    WildcardNotFinal,
 }
 
 pub type Result<T> = std::result::Result<T, JsonPathError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Segment {
-    Field(String),
-    Index(usize),
-    Wildcard,
+/// Resolves all matches for a JSONPath expression. Returns an owned vector;
+/// callers retain no borrow on `root`.
+pub fn resolve(root: &Value, path: &str) -> Result<Vec<Value>> {
+    let parsed = serde_json_path::JsonPath::parse(path).map_err(|source| JsonPathError::Parse {
+        path: path.to_string(),
+        source,
+    })?;
+    Ok(parsed
+        .query(root)
+        .all()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>())
 }
 
+/// Resolves a JSONPath expression and returns the first match. Returns
+/// [`JsonPathError::Missing`] if the path resolved to zero nodes.
 pub fn resolve_one(root: &Value, path: &str) -> Result<Value> {
-    let values = resolve(root, path)?;
-    values
+    let nodes = resolve(root, path)?;
+    nodes
         .into_iter()
         .next()
         .ok_or_else(|| JsonPathError::Missing(path.to_string()))
 }
 
-pub fn resolve(root: &Value, path: &str) -> Result<Vec<Value>> {
-    let segments = parse(path)?;
-    let mut current = vec![root.clone()];
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-    for (index, segment) in segments.iter().enumerate() {
-        let last = index + 1 == segments.len();
-        let mut next = Vec::new();
-
-        for value in &current {
-            match segment {
-                Segment::Field(field) => {
-                    let Some(child) = value.get(field) else {
-                        return Err(JsonPathError::Missing(field.clone()));
-                    };
-                    next.push(child.clone());
-                }
-                Segment::Index(item_index) => {
-                    let Some(child) = value.as_array().and_then(|items| items.get(*item_index))
-                    else {
-                        return Err(JsonPathError::Missing(format!("[{item_index}]")));
-                    };
-                    next.push(child.clone());
-                }
-                Segment::Wildcard => {
-                    if !last {
-                        return Err(JsonPathError::WildcardNotFinal);
-                    }
-                    let Some(items) = value.as_array() else {
-                        return Err(JsonPathError::Missing("[*]".to_string()));
-                    };
-                    next.extend(items.iter().cloned());
-                }
-            }
-        }
-
-        current = next;
+    #[test]
+    fn resolves_nested_field() {
+        let root = json!({"a": {"b": 42}});
+        assert_eq!(resolve_one(&root, "$.a.b").unwrap(), json!(42));
     }
 
-    Ok(current)
-}
-
-fn parse(path: &str) -> Result<Vec<Segment>> {
-    let Some(mut rest) = path.strip_prefix('$') else {
-        return Err(JsonPathError::InvalidRoot(path.to_string()));
-    };
-    let mut segments = Vec::new();
-
-    while !rest.is_empty() {
-        if let Some(after_dot) = rest.strip_prefix('.') {
-            let field_len = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
-            if field_len == 0 {
-                return Err(JsonPathError::InvalidSegment(rest.to_string()));
-            }
-            let field = &after_dot[..field_len];
-            segments.push(Segment::Field(field.to_string()));
-            rest = &after_dot[field_len..];
-        } else if let Some(after_bracket) = rest.strip_prefix('[') {
-            let Some(end) = after_bracket.find(']') else {
-                return Err(JsonPathError::InvalidSegment(rest.to_string()));
-            };
-            let token = &after_bracket[..end];
-            if token == "*" {
-                segments.push(Segment::Wildcard);
-            } else {
-                let index = token
-                    .parse::<usize>()
-                    .map_err(|_| JsonPathError::InvalidSegment(rest.to_string()))?;
-                segments.push(Segment::Index(index));
-            }
-            rest = &after_bracket[end + 1..];
-        } else {
-            return Err(JsonPathError::InvalidSegment(rest.to_string()));
-        }
+    #[test]
+    fn resolves_array_index() {
+        let root = json!({"items": [10, 20, 30]});
+        assert_eq!(resolve_one(&root, "$.items[1]").unwrap(), json!(20));
     }
 
-    Ok(segments)
+    #[test]
+    fn resolves_wildcard_in_middle() {
+        // RFC 9535 supports wildcards anywhere; the previous home-grown parser
+        // forbade non-final wildcards. This is a regression test that the new
+        // backend lifts that limit.
+        let root = json!({"items": [{"v": 1}, {"v": 2}, {"v": 3}]});
+        let values = resolve(&root, "$.items[*].v").unwrap();
+        assert_eq!(values, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    #[test]
+    fn missing_returns_missing_error() {
+        let root = json!({"a": 1});
+        let err = resolve_one(&root, "$.nope").unwrap_err();
+        assert!(matches!(err, JsonPathError::Missing(_)));
+    }
+
+    #[test]
+    fn invalid_syntax_returns_parse_error() {
+        let root = json!({});
+        let err = resolve(&root, "not-a-path").unwrap_err();
+        assert!(matches!(err, JsonPathError::Parse { .. }));
+    }
+
+    #[test]
+    fn filter_expression_works() {
+        let root = json!({"items": [{"v": 1}, {"v": 2}, {"v": 3}]});
+        let values = resolve(&root, "$.items[?@.v > 1].v").unwrap();
+        assert_eq!(values, vec![json!(2), json!(3)]);
+    }
 }

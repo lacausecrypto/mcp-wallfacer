@@ -1,0 +1,81 @@
+# Phase D D4: matches_schema runs the value at `path` through
+# `jsonschema::validator_for`. The schema is inlined verbatim and supports
+# the full JSON Schema 2020-12 surface.
+version: 2
+invariants:
+  - name: "user response has the expected shape"
+    tool: get_user
+    fixed: { id: "42" }
+    assert:
+      - kind: matches_schema
+        path: "$.response.structuredContent"
+        schema:
+          type: object
+          required: [id, name, email]
+          properties:
+            id: { type: integer, minimum: 1 }
+            name: { type: string, minLength: 1 }
+            email: { type: string, format: email }
+
+  - name: "search response is a list of well-typed hits"
+    tool: search
+    fixed: { q: "anything" }
+    assert:
+      - kind: matches_schema
+        path: "$.response.structuredContent.hits"
+        schema:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            required: [title, score]
+            properties:
+              title: { type: string, minLength: 1 }
+              score: { type: number, minimum: 0, maximum: 1 }
+
+  - name: "error envelope (when the call failed)"
+    tool: divide
+    fixed: { a: 1, b: 0 }
+    assert:
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [isError, content]
+          properties:
+            isError: { type: boolean, enum: [true] }
+            content:
+              type: array
+              minItems: 1
+
+  - name: "either find-or-not-found shape"
+    tool: lookup
+    fixed: { id: "missing" }
+    assert:
+      - kind: matches_schema
+        path: "$.response.structuredContent"
+        schema:
+          oneOf:
+            - type: object
+              required: [found]
+              properties:
+                found: { type: boolean, enum: [false] }
+            - type: object
+              required: [found, value]
+              properties:
+                found: { type: boolean, enum: [true] }
+                value: { type: string }
+
+  - name: "rate-limit headers carry numeric quotas"
+    tool: ping
+    fixed: {}
+    assert:
+      - kind: matches_schema
+        path: "$.response.structuredContent.rate_limit"
+        schema:
+          type: object
+          required: [limit, remaining]
+          properties:
+            limit: { type: integer, minimum: 0 }
+            remaining: { type: integer, minimum: 0 }
+            reset: { type: integer }

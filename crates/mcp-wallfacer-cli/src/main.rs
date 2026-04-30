@@ -1,4 +1,5 @@
 mod commands;
+mod reporters;
 
 use std::{io::IsTerminal, path::PathBuf};
 
@@ -27,6 +28,12 @@ enum Command {
     Torture(commands::torture::TortureArgs),
     Corpus(commands::corpus::CorpusArgs),
     Ci(commands::ci::CiArgs),
+    /// Re-run a stored finding against the configured target. Looks up
+    /// `WALLFACER_REPLAY_<KEY>` env vars to substitute back any redacted
+    /// payload field locally; substitutions are never logged.
+    Replay(commands::replay::ReplayArgs),
+    /// Compare two corpus directories and report regressions / fixes.
+    Diff(commands::diff::DiffArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -45,6 +52,8 @@ async fn main() -> Result<()> {
         Some(Command::Torture(args)) => commands::torture::run(args, cli.config.as_deref()).await,
         Some(Command::Corpus(args)) => commands::corpus::run(args, cli.config.as_deref()).await,
         Some(Command::Ci(args)) => commands::ci::run(args, cli.config.as_deref()).await,
+        Some(Command::Replay(args)) => commands::replay::run(args, cli.config.as_deref()).await,
+        Some(Command::Diff(args)) => commands::diff::run(args).await,
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())

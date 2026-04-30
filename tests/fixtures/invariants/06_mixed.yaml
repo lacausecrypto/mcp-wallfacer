@@ -1,0 +1,76 @@
+# Phase D: realistic invariants combining several v2 features at once.
+version: 2
+invariants:
+  - name: "list_users: shape + per-user bounds + non-empty"
+    tool: list_users
+    fixed: {}
+    assert:
+      - kind: all_of
+        assert:
+          - kind: matches_schema
+            path: "$.response.structuredContent"
+            schema:
+              type: object
+              required: [users]
+              properties:
+                users: { type: array }
+          - kind: not
+            assertion:
+              kind: length_eq
+              path: "$.response.structuredContent.users"
+              value: { value: 0 }
+          - kind: for_each
+            path: "$.response.structuredContent.users[*]"
+            assert:
+              - kind: matches_schema
+                path: "$.item"
+                schema:
+                  type: object
+                  required: [id, name]
+                  properties:
+                    id: { type: integer, minimum: 1 }
+                    name: { type: string, minLength: 1 }
+
+  - name: "paginate: limit honored AND no cursor leak"
+    tool: paginate
+    generate:
+      limit: { type: integer, min: 1, max: 50 }
+    assert:
+      - kind: all_of
+        assert:
+          - kind: length_at_most
+            path: "$.response.structuredContent.items"
+            value: { path: "$.input.limit" }
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.structuredContent.next" }
+                rhs: { value: null }
+              - kind: matches_regex
+                path: "$.response.structuredContent.next"
+                pattern: "^[A-Za-z0-9._-]+$"
+
+  - name: "rank: scores monotone non-increasing AND bounded"
+    tool: rank
+    fixed: { documents: ["a", "b", "c", "d"] }
+    assert:
+      - kind: all_of
+        assert:
+          - kind: for_each
+            path: "$.response.structuredContent.scores[*]"
+            assert:
+              - kind: at_least
+                path: "$.item"
+                value: { value: 0 }
+              - kind: at_most
+                path: "$.item"
+                value: { value: 1 }
+          - kind: matches_schema
+            path: "$.response.structuredContent"
+            schema:
+              type: object
+              required: [scores]
+              properties:
+                scores:
+                  type: array
+                  minItems: 1

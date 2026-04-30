@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -8,7 +8,11 @@ use std::{
 
 use thiserror::Error;
 
-use crate::finding::Finding;
+use crate::{
+    finding::Finding,
+    redact::Redact,
+    target::{default_lock_timeout_ms, OutputConfig},
+};
 
 #[derive(Debug, Error)]
 pub enum CorpusError {
@@ -41,11 +45,31 @@ pub type Result<T> = std::result::Result<T, CorpusError>;
 #[derive(Debug, Clone)]
 pub struct Corpus {
     root: PathBuf,
+    lock_timeout: Duration,
 }
 
 impl Corpus {
+    /// Builds a corpus rooted at `root` with the default lock timeout.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            lock_timeout: Duration::from_millis(default_lock_timeout_ms()),
+        }
+    }
+
+    /// Builds a corpus from a config, honoring `[output] lock_timeout_ms`.
+    pub fn from_config(config: &OutputConfig) -> Self {
+        Self {
+            root: config.corpus_dir.clone(),
+            lock_timeout: Duration::from_millis(config.lock_timeout_ms),
+        }
+    }
+
+    /// Override the lock timeout (used by tests and CLI overrides).
+    #[must_use]
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     pub fn write_finding(&self, finding: &Finding) -> Result<PathBuf> {
@@ -59,7 +83,7 @@ impl Corpus {
             source,
         })?;
 
-        let _lock = CorpusLock::acquire(wallfacer_dir.join(".lock"))?;
+        let _lock = CorpusLock::acquire(wallfacer_dir.join(".lock"), self.lock_timeout)?;
 
         let tool_dir = self.root.join(&finding.tool);
         fs::create_dir_all(&tool_dir).map_err(|source| CorpusError::CreateDir {
@@ -67,16 +91,18 @@ impl Corpus {
             source,
         })?;
 
-        let path = tool_dir.join(format!("{}.json", finding.id));
+        // Persist the redacted form: corpus files may end up in CI artefacts,
+        // shared storage, or commit history. The in-memory `finding` is
+        // preserved untouched for callers that need the original payload (e.g.
+        // an in-process replay).
+        let redacted = finding.redacted();
+        let path = tool_dir.join(format!("{}.json", redacted.id));
         let body =
-            serde_json::to_string_pretty(finding).map_err(|source| CorpusError::Serialize {
-                id: finding.id.clone(),
+            serde_json::to_string_pretty(&redacted).map_err(|source| CorpusError::Serialize {
+                id: redacted.id.clone(),
                 source,
             })?;
-        fs::write(&path, body).map_err(|source| CorpusError::Write {
-            path: path.clone(),
-            source,
-        })?;
+        write_secure(&path, body.as_bytes())?;
         Ok(path)
     }
 
@@ -100,6 +126,37 @@ impl Corpus {
             .find(|finding| finding.id == id || finding.id.starts_with(id))
             .ok_or_else(|| CorpusError::NotFound(id.to_string()))
     }
+}
+
+/// Writes a corpus file with restrictive permissions on Unix (mode `0o600`),
+/// so the file is readable only by the owning user. On Windows, we fall back
+/// to the default ACL inherited from the parent directory; operators sharing
+/// runners should rely on directory-level permissions there. This is
+/// documented in `docs/security.md` (Phase A).
+fn write_secure(path: &Path, body: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|source| CorpusError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.write_all(body).map_err(|source| CorpusError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // If the file pre-existed with looser permissions, `mode(0o600)` above
+    // would not have applied. Tighten after the fact on Unix; best-effort.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 fn visit_json_files(path: &Path, visitor: &mut impl FnMut(&Path) -> Result<()>) -> Result<()> {
@@ -139,17 +196,30 @@ struct CorpusLock {
     path: PathBuf,
 }
 
+const LOCK_BACKOFF_INITIAL: Duration = Duration::from_millis(25);
+const LOCK_BACKOFF_CAP: Duration = Duration::from_millis(1_000);
+
 impl CorpusLock {
-    fn acquire(path: PathBuf) -> Result<Self> {
-        let start = Instant::now();
+    /// Tries to acquire the corpus lock, polling with exponential backoff
+    /// (capped at [`LOCK_BACKOFF_CAP`]) until either the lock is held or
+    /// `timeout` elapses. Phase E3 made the timeout configurable.
+    fn acquire(path: PathBuf, timeout: Duration) -> Result<Self> {
+        let deadline = Instant::now() + timeout;
+        let mut backoff = LOCK_BACKOFF_INITIAL;
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(_) => return Ok(Self { path }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() >= Duration::from_secs(5) {
+                    if Instant::now() >= deadline {
                         return Err(CorpusError::LockTimeout(path));
                     }
-                    thread::sleep(Duration::from_millis(50));
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let wait = backoff.min(remaining);
+                    if wait.is_zero() {
+                        return Err(CorpusError::LockTimeout(path));
+                    }
+                    thread::sleep(wait);
+                    backoff = (backoff * 2).min(LOCK_BACKOFF_CAP);
                 }
                 Err(source) => {
                     return Err(CorpusError::Lock {

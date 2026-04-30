@@ -1,0 +1,75 @@
+# Path-traversal rule pack.
+#
+# Probes file-handling tools with classic traversal payloads and asserts
+# the response cannot contain content from outside the intended root.
+# Loadable via: `wallfacer property --pack path-traversal`.
+version: 2
+invariants:
+  - name: "path.dotdot_segments_rejected_by_read_file"
+    tool: read_file
+    fixed:
+      path: "../../../etc/passwd"
+    assert:
+      # Either the server flagged the request, or no /etc-style content
+      # leaked back. Both are acceptable defences.
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)root:.*:/bin/(ba)?sh"
+
+  - name: "path.absolute_paths_outside_root_rejected"
+    tool: read_file
+    fixed:
+      path: "/etc/shadow"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)root:|nobody:"
+
+  - name: "path.windows_unc_rejected"
+    tool: read_file
+    fixed:
+      path: "\\\\evilhost\\share\\hosts"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+
+  - name: "path.symlink_escape_rejected_by_write_file"
+    tool: write_file
+    fixed:
+      path: "../escaped.txt"
+      contents: "<wallfacer-secret>"
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+
+  - name: "path.url_encoded_traversal_normalised_or_rejected"
+    tool: read_file
+    fixed:
+      path: "..%2F..%2F..%2Fetc%2Fpasswd"
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)root:.*:/bin/(ba)?sh"

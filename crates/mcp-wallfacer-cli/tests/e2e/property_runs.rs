@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use std::time::Duration;
@@ -27,8 +29,8 @@ fn property_reports_single_paginate_failure() {
         .stdout
         .clone();
 
-    let findings: Value = serde_json::from_slice(&output).expect("valid findings JSON");
-    let findings = findings.as_array().expect("findings array");
+    let report: Value = serde_json::from_slice(&output).expect("valid findings JSON");
+    let findings = report["findings"].as_array().expect("findings array");
     assert_eq!(findings.len(), 1, "expected exactly 1 property finding");
     assert_eq!(findings[0]["tool"], "paginate");
     assert_eq!(findings[0]["kind"]["type"], "property_failure");

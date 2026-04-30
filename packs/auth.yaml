@@ -1,0 +1,61 @@
+# Authentication / authorization rule pack.
+#
+# Loadable via: `wallfacer property --pack auth`.
+# These invariants codify common authentication contracts an MCP server
+# should respect. They are deliberately conservative: tools you don't have
+# can be commented out without invalidating the pack.
+version: 2
+invariants:
+  - name: "auth.unauthenticated_requests_are_rejected"
+    tool: whoami
+    fixed: {}
+    assert:
+      - kind: any_of
+        assert:
+          # Either the server returns isError=true (preferred)
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          # Or the structured response carries an explicit "anonymous" flag.
+          - kind: equals
+            lhs: { path: "$.response.structuredContent.anonymous" }
+            rhs: { value: true }
+
+  - name: "auth.bearer_tokens_never_echoed"
+    tool: echo
+    fixed:
+      text: "Authorization: Bearer abc123"
+    assert:
+      # The server must NOT echo the bearer back in plaintext. If your
+      # echo tool is a literal echoer, scope this invariant to a more
+      # secret-aware tool instead.
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "Bearer\\s+[A-Za-z0-9\\.-_]+"
+
+  - name: "auth.role_based_listing_filters_admin_resources"
+    tool: list_resources
+    fixed:
+      role: "user"
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.resources[*]"
+        assert:
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.item.uri"
+              pattern: "(?i)/admin(/|$)"
+
+  - name: "auth.session_cookies_are_never_returned_in_payloads"
+    tool: get_user
+    fixed:
+      id: "1"
+    assert:
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "(?i)session(_id|=)"

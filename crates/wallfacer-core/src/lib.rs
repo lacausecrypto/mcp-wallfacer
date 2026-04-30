@@ -1,9 +1,16 @@
+// Phase A introduces `missing_docs = "warn"` so future modules grow rustdoc.
+// Existing 0.1 surface is undocumented; allowing here keeps the warning useful
+// for new code. To be lifted progressively in Phase B/C.
+#![allow(missing_docs)]
+
 pub mod client;
 pub mod corpus;
 pub mod differential;
 pub mod finding;
 pub mod mutate;
 pub mod property;
+pub mod redact;
+pub mod run;
 pub mod sarif;
 pub mod seed;
 pub mod target;

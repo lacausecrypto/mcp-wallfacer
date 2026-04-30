@@ -56,20 +56,49 @@ pub struct Config {
     pub severity: SeverityConfig,
     #[serde(default)]
     pub allow_destructive: AllowDestructiveConfig,
+    #[serde(default)]
+    pub destructive: DestructiveConfig,
+}
+
+/// `[destructive]` section of `wallfacer.toml`. Empty by default; populating
+/// `patterns` replaces the built-in keyword list (`delete`, `drop`, ...).
+///
+/// ```toml
+/// [destructive]
+/// patterns = ["^remove_.*$", "^drop_.*$"]
+/// ```
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DestructiveConfig {
+    /// Regex patterns matched against tool names. When non-empty, the
+    /// default keyword detector is disabled in favor of these patterns.
+    #[serde(default)]
+    pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     #[serde(default = "default_corpus_dir")]
     pub corpus_dir: PathBuf,
+    /// Maximum time, in milliseconds, that a corpus writer waits for the
+    /// shared `.wallfacer/.lock` before giving up. Phase E3 raised the
+    /// default from a hardcoded 5 s to 30 s and made it configurable so
+    /// massively-parallel CI matrices don't trip on slow filesystems.
+    #[serde(default = "default_lock_timeout_ms")]
+    pub lock_timeout_ms: u64,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             corpus_dir: default_corpus_dir(),
+            lock_timeout_ms: default_lock_timeout_ms(),
         }
     }
+}
+
+/// Default value for [`OutputConfig::lock_timeout_ms`].
+pub fn default_lock_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

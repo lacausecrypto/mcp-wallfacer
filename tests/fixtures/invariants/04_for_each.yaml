@@ -1,0 +1,75 @@
+# Phase D D3: for_each over wildcard JSONPaths. Inside the assert block,
+# `$.item` exposes the iterated node; `$.index` exposes its position.
+# `$.input` and `$.response` remain accessible for cross-references.
+version: 2
+invariants:
+  - name: "every list user has a numeric id"
+    tool: list_users
+    fixed: {}
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.users[*]"
+        assert:
+          - kind: is_type
+            path: "$.item.id"
+            type: integer
+          - kind: at_least
+            path: "$.item.id"
+            value: { value: 0 }
+
+  - name: "every search hit carries a non-empty title"
+    tool: search
+    fixed: { q: "rust" }
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.hits[*]"
+        assert:
+          - kind: is_type
+            path: "$.item.title"
+            type: string
+          - kind: length_at_least
+            path: "$.item.title"
+            value: { value: 1 }
+
+  - name: "scores are bounded between 0 and 1 (per item)"
+    tool: rank
+    fixed: { documents: ["a", "b", "c"] }
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.scores[*]"
+        assert:
+          - kind: at_least
+            path: "$.item"
+            value: { value: 0 }
+          - kind: at_most
+            path: "$.item"
+            value: { value: 1 }
+
+  - name: "every page in pagination returns a known kind"
+    tool: paginate
+    fixed: { limit: 10 }
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.pages[*]"
+        assert:
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.item.kind" }
+                rhs: { value: "data" }
+              - kind: equals
+                lhs: { path: "$.item.kind" }
+                rhs: { value: "summary" }
+
+  - name: "no item leaks the wallfacer secret placeholder"
+    tool: search
+    fixed: { q: "auth" }
+    assert:
+      - kind: for_each
+        path: "$.response.structuredContent.hits[*]"
+        assert:
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.item.snippet"
+              pattern: "<wallfacer-secret>"
