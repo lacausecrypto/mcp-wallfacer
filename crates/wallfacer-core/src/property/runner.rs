@@ -255,7 +255,7 @@ fn generated_value(spec: &ValueSpec, rng: &mut impl RngCore) -> Value {
                 .map(Value::Number)
                 .unwrap_or(Value::Null)
         }
-        ValueKind::Boolean => Value::Bool(rng.next_u64() % 2 == 0),
+        ValueKind::Boolean => Value::Bool((rng.next_u64() & 1) == 0),
         ValueKind::Array => {
             let min = spec.min_items.unwrap_or(0);
             let max = spec.max_items.unwrap_or(8).max(min).min(64);

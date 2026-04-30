@@ -16,7 +16,7 @@ pub enum TargetError {
     #[error("failed to parse config {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
 }
 
@@ -93,7 +93,7 @@ impl Config {
         })?;
         toml::from_str(&source).map_err(|source| TargetError::Parse {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })
     }
 

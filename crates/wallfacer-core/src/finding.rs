@@ -96,7 +96,7 @@ fn canonicalize(value: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
         Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
 
             let mut ordered = Map::new();
             for (key, value) in entries {

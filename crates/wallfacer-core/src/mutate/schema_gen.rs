@@ -46,7 +46,7 @@ pub fn generate_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> 
         Some("string") => string_value(schema, rng, effective_mode),
         Some("integer") => integer_value(schema, rng, effective_mode),
         Some("number") => number_value(schema, rng, effective_mode),
-        Some("boolean") => Value::Bool(rng.next_u64() % 2 == 0),
+        Some("boolean") => Value::Bool((rng.next_u64() & 1) == 0),
         Some("array") => array_value(schema, rng, effective_mode),
         Some("object") | None => object_value(schema, rng, effective_mode),
         Some("null") => Value::Null,

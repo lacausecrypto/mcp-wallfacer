@@ -1,5 +1,11 @@
 # mcp-wallfacer
 
+[![Crates.io](https://img.shields.io/crates/v/mcp-wallfacer?style=plastic)](https://crates.io/crates/mcp-wallfacer)
+[![All-time downloads](https://img.shields.io/crates/d/mcp-wallfacer?style=plastic&label=downloads)](https://crates.io/crates/mcp-wallfacer)
+[![Docs.rs](https://img.shields.io/docsrs/mcp-wallfacer?style=plastic)](https://docs.rs/mcp-wallfacer)
+[![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-wallfacer/ci.yml?branch=main&style=plastic&label=ci)](https://github.com/lacausecrypto/mcp-wallfacer/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/mcp-wallfacer?style=plastic)](https://github.com/lacausecrypto/mcp-wallfacer#license)
+
 `mcp-wallfacer` is a dynamic validation harness for MCP servers. It connects to a server over stdio or Streamable HTTP, exercises tools with generated inputs, checks declared response schemas and invariants, and stores reproducible findings in `.wallfacer/corpus/`.
 
 It is intended for MCP server authors before publication and in CI. It complements static scanners such as Snyk Agent Scan, Cisco MCP Scanner, and Enkrypt-style checks by validating runtime behavior instead of inspecting source code or tool descriptions.
