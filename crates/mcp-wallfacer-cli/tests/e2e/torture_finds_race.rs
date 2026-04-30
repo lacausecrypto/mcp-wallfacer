@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 
 #[test]
@@ -6,7 +6,7 @@ fn torture_finds_counter_race_and_state_leak() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let _ = std::fs::remove_dir_all(workspace_root.join(".wallfacer"));
 
-    let mut race = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut race = cargo_bin_cmd!("wallfacer");
     let race_output = race
         .current_dir(&workspace_root)
         .args([
@@ -38,7 +38,7 @@ fn torture_finds_counter_race_and_state_leak() {
         "expected at least one race finding"
     );
 
-    let mut leak = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut leak = cargo_bin_cmd!("wallfacer");
     let leak_output = leak
         .current_dir(&workspace_root)
         .args([

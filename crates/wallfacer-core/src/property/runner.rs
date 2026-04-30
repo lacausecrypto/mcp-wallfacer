@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngCore;
 use regex::Regex;
 use serde_json::{json, Map, Number, Value};
 use thiserror::Error;
@@ -23,7 +23,7 @@ pub enum RunnerError {
 
 pub type Result<T> = std::result::Result<T, RunnerError>;
 
-pub fn input_for_case(invariant: &Invariant, case_index: u32, rng: &mut impl Rng) -> Value {
+pub fn input_for_case(invariant: &Invariant, case_index: u32, rng: &mut impl RngCore) -> Value {
     if let Some(fixed) = &invariant.fixed {
         return Value::Object(
             fixed
@@ -233,7 +233,7 @@ fn boundary_value(spec: &ValueSpec) -> Value {
     }
 }
 
-fn generated_value(spec: &ValueSpec, rng: &mut impl Rng) -> Value {
+fn generated_value(spec: &ValueSpec, rng: &mut impl RngCore) -> Value {
     match spec.kind {
         ValueKind::String => {
             let min = spec.min_length.unwrap_or(0);

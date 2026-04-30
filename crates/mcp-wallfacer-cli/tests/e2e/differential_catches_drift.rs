@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
 use serde_json::Value;
 
@@ -7,7 +7,7 @@ fn differential_learns_then_reports_schema_violations() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let _ = std::fs::remove_dir_all(workspace_root.join(".wallfacer"));
 
-    let mut learn = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut learn = cargo_bin_cmd!("wallfacer");
     learn
         .current_dir(&workspace_root)
         .args([
@@ -20,7 +20,7 @@ fn differential_learns_then_reports_schema_violations() {
         .success()
         .stdout(contains("learned"));
 
-    let mut run = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut run = cargo_bin_cmd!("wallfacer");
     let output = run
         .current_dir(&workspace_root)
         .args([

@@ -1,24 +1,24 @@
-use rand::Rng;
+use rand::RngCore;
 use serde_json::{json, Value};
 
-pub fn pick<'a, T>(rng: &mut impl Rng, values: &'a [T]) -> &'a T {
+pub fn pick<'a, T>(rng: &mut impl RngCore, values: &'a [T]) -> &'a T {
     let index = (rng.next_u64() as usize) % values.len();
     &values[index]
 }
 
-pub fn chance(rng: &mut impl Rng, numerator: u64, denominator: u64) -> bool {
+pub fn chance(rng: &mut impl RngCore, numerator: u64, denominator: u64) -> bool {
     denominator > 0 && rng.next_u64() % denominator < numerator
 }
 
-pub fn boundary_int(rng: &mut impl Rng) -> i64 {
+pub fn boundary_int(rng: &mut impl RngCore) -> i64 {
     *pick(rng, &[i64::MIN, i64::MAX, 0, -1, 1])
 }
 
-pub fn boundary_float(rng: &mut impl Rng) -> f64 {
+pub fn boundary_float(rng: &mut impl RngCore) -> f64 {
     *pick(rng, &[f64::MAX, f64::MIN, 0.0, -0.0, 1.0, -1.0])
 }
 
-pub fn long_or_tricky_string(rng: &mut impl Rng) -> String {
+pub fn long_or_tricky_string(rng: &mut impl RngCore) -> String {
     match rng.next_u64() % 10 {
         0 => String::new(),
         1 => "a".to_string(),

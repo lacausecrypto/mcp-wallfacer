@@ -41,7 +41,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
       - run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Package Unix
         if: runner.os != 'Windows'
         run: |
@@ -58,4 +65,3 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.archive }}
-

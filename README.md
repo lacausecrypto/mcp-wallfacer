@@ -6,6 +6,8 @@ It is intended for MCP server authors before publication and in CI. It complemen
 
 ## Install
 
+Requires Rust 1.88 or newer. The original 1.83 target is not compatible with the current official `rmcp` SDK, which uses Rust features stabilized after 1.83.
+
 ```bash
 cargo install mcp-wallfacer
 ```
@@ -68,4 +70,3 @@ headers = { Authorization = "Bearer xxx" }
 - v0.2: richer property DSL and regression comparison between server versions.
 - v0.3: rule packs for common MCP security and reliability issues.
 - v0.4: shared corpus workflows and reporting.
-

@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngCore;
 use serde_json::{json, Map, Number, Value};
 use tracing::warn;
 
@@ -11,14 +11,14 @@ pub enum GenMode {
     Mixed,
 }
 
-pub fn generate_payload(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+pub fn generate_payload(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     match generate_value(schema, rng, mode) {
         Value::Object(map) => Value::Object(map),
         _ => Value::Object(Map::new()),
     }
 }
 
-pub fn generate_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+pub fn generate_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     if contains_unsupported_keyword(schema) {
         warn!("schema contains unsupported composition keyword; falling back");
         return fallback_for(schema);
@@ -60,7 +60,7 @@ pub fn generate_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Valu
     }
 }
 
-fn string_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+fn string_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     if mode == GenMode::Adversarial {
         return Value::String(strategies::long_or_tricky_string(rng));
     }
@@ -81,7 +81,7 @@ fn string_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
     Value::String(value)
 }
 
-fn integer_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+fn integer_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     if mode == GenMode::Adversarial {
         return json!(strategies::boundary_int(rng));
     }
@@ -106,7 +106,7 @@ fn integer_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
     json!(value)
 }
 
-fn number_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+fn number_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     if mode == GenMode::Adversarial {
         return Number::from_f64(strategies::boundary_float(rng))
             .map(Value::Number)
@@ -129,7 +129,7 @@ fn number_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn array_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+fn array_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     if mode == GenMode::Adversarial && strategies::chance(rng, 1, 10) {
         return strategies::deep_nesting(1000);
     }
@@ -150,7 +150,7 @@ fn array_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
     )
 }
 
-fn object_value(schema: &Value, rng: &mut impl Rng, mode: GenMode) -> Value {
+fn object_value(schema: &Value, rng: &mut impl RngCore, mode: GenMode) -> Value {
     let properties = schema
         .get("properties")
         .and_then(Value::as_object)

@@ -1,20 +1,25 @@
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, future::Future, path::Path, process::Stdio, time::Duration};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult, Prompt, Resource, Tool},
-    service::{RoleClient, RunningService},
+    service::{RoleClient, RunningService, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
-        TokioChildProcess,
+        async_rw::AsyncRwTransport, streamable_http_client::StreamableHttpClientTransportConfig,
+        StreamableHttpClientTransport, Transport as RmcpTransport,
     },
     ServiceExt,
 };
 use serde_json::Value;
 use thiserror::Error;
-use tokio::{process::Command, time};
+use tokio::{
+    process::{Child, ChildStdin, ChildStdout, Command},
+    time,
+};
 
-use crate::target::{Target, Transport};
+use crate::target::{Target, Transport as TargetTransport};
+
+const CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -48,15 +53,15 @@ pub enum CallOutcome {
 impl Client {
     pub async fn connect(target: &Target) -> Result<Self> {
         let service = match &target.transport {
-            Transport::Stdio { command, args, env } => {
+            TargetTransport::Stdio { command, args, env } => {
                 let mut process = Command::new(command);
                 process.args(args).envs(env);
-                let transport = TokioChildProcess::new(process).map_err(ClientError::Spawn)?;
+                let transport = StdioChildTransport::spawn(process).map_err(ClientError::Spawn)?;
                 ().serve(transport)
                     .await
                     .map_err(|error| ClientError::Initialize(error.to_string()))?
             }
-            Transport::Http { url, headers } => {
+            TargetTransport::Http { url, headers } => {
                 let headers = header_map(headers)?;
                 let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
                     .custom_headers(headers);
@@ -164,4 +169,80 @@ fn header_map(headers: &HashMap<String, String>) -> Result<HashMap<HeaderName, H
             Ok((header_name, header_value))
         })
         .collect()
+}
+
+struct StdioChildTransport {
+    child: Option<Child>,
+    transport: AsyncRwTransport<RoleClient, ChildStdout, ChildStdin>,
+}
+
+impl StdioChildTransport {
+    fn spawn(mut command: Command) -> std::io::Result<Self> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+
+        let mut child = command.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("child stdout was already taken"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("child stdin was already taken"))?;
+
+        Ok(Self {
+            child: Some(child),
+            transport: AsyncRwTransport::new_client(stdout, stdin),
+        })
+    }
+
+    async fn close_child(&mut self) -> std::io::Result<()> {
+        self.transport.close().await?;
+
+        if let Some(mut child) = self.child.take() {
+            match time::timeout(CHILD_SHUTDOWN_TIMEOUT, child.wait()).await {
+                Ok(status) => {
+                    status?;
+                }
+                Err(_) => {
+                    child.kill().await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for StdioChildTransport {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+    }
+}
+
+impl RmcpTransport<RoleClient> for StdioChildTransport {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send + 'static {
+        self.transport.send(item)
+    }
+
+    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
+        self.transport.receive()
+    }
+
+    fn close(&mut self) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send {
+        self.close_child()
+    }
 }

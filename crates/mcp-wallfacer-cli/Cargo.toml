@@ -4,46 +4,50 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "wallfacer"
 path = "src/main.rs"
 
 [dependencies]
-wallfacer-core = { path = "../wallfacer-core" }
+wallfacer-core = { version = "0.1.0", path = "../wallfacer-core" }
 anyhow = "1"
-clap = { version = "4.5", features = ["derive", "env"] }
-comfy-table = "7"
+clap = { version = ">=4.5, <4.6", features = ["derive", "env"] }
+comfy-table = ">=7, <7.2"
 futures = "0.3"
 indicatif = "0.18"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
-rand = "0.10"
-rand_chacha = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
 serde_json = "1"
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
+assert_cmd = ">=2, <2.1.3"
+predicates = ">=3, <3.2"
 
 [[test]]
 name = "doctor_lists_tools"
-path = "../../tests/e2e/doctor_lists_tools.rs"
+path = "tests/e2e/doctor_lists_tools.rs"
 
 [[test]]
 name = "fuzz_finds_crash"
-path = "../../tests/e2e/fuzz_finds_crash.rs"
+path = "tests/e2e/fuzz_finds_crash.rs"
 
 [[test]]
 name = "differential_catches_drift"
-path = "../../tests/e2e/differential_catches_drift.rs"
+path = "tests/e2e/differential_catches_drift.rs"
 
 [[test]]
 name = "property_runs"
-path = "../../tests/e2e/property_runs.rs"
+path = "tests/e2e/property_runs.rs"
 
 [[test]]
 name = "torture_finds_race"
-path = "../../tests/e2e/torture_finds_race.rs"
+path = "tests/e2e/torture_finds_race.rs"

@@ -1,8 +1,8 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 
 #[test]
 fn version_prints_package_version() {
-    let mut cmd = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut cmd = cargo_bin_cmd!("wallfacer");
 
     cmd.arg("--version")
         .assert()

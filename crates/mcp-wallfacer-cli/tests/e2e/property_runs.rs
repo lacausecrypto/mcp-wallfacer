@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 
 #[test]
@@ -6,7 +6,7 @@ fn property_reports_single_paginate_failure() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let _ = std::fs::remove_dir_all(workspace_root.join(".wallfacer"));
 
-    let mut cmd = Command::cargo_bin("wallfacer").expect("wallfacer binary");
+    let mut cmd = cargo_bin_cmd!("wallfacer");
     let output = cmd
         .current_dir(&workspace_root)
         .args([

@@ -5,6 +5,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-
+description = "Dynamic validation harness for MCP servers"
+repository = "https://github.com/lacausecrypto/mcp-wallfacer"
+homepage = "https://github.com/lacausecrypto/mcp-wallfacer"
