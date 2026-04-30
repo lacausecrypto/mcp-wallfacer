@@ -1,3 +1,4 @@
+pub mod corpus;
 pub mod differential;
 pub mod doctor;
 pub mod fuzz;

@@ -25,6 +25,15 @@ pub enum CorpusError {
     },
     #[error("failed to write corpus file {path}: {source}")]
     Write { path: PathBuf, source: io::Error },
+    #[error("failed to read corpus file {path}: {source}")]
+    Read { path: PathBuf, source: io::Error },
+    #[error("failed to parse corpus file {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("finding `{0}` not found in corpus")]
+    NotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, CorpusError>;
@@ -70,6 +79,60 @@ impl Corpus {
         })?;
         Ok(path)
     }
+
+    pub fn list_findings(&self) -> Result<Vec<Finding>> {
+        let mut findings = Vec::new();
+        if !self.root.is_dir() {
+            return Ok(findings);
+        }
+
+        visit_json_files(&self.root, &mut |path| {
+            findings.push(read_finding_file(path)?);
+            Ok(())
+        })?;
+        findings.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(findings)
+    }
+
+    pub fn find_by_id(&self, id: &str) -> Result<Finding> {
+        self.list_findings()?
+            .into_iter()
+            .find(|finding| finding.id == id || finding.id.starts_with(id))
+            .ok_or_else(|| CorpusError::NotFound(id.to_string()))
+    }
+}
+
+fn visit_json_files(path: &Path, visitor: &mut impl FnMut(&Path) -> Result<()>) -> Result<()> {
+    for entry in fs::read_dir(path).map_err(|source| CorpusError::Read {
+        path: path.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CorpusError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            visit_json_files(&path, visitor)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            visitor(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_finding_file(path: &Path) -> Result<Finding> {
+    let body = fs::read_to_string(path).map_err(|source| CorpusError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str(&body).map_err(|source| CorpusError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 struct CorpusLock {
