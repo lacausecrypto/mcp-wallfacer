@@ -12,3 +12,35 @@ corpus_dir = ".wallfacer/corpus"
 # detection rather than being filtered out before fuzzing.
 [allow_destructive]
 tools = ["^crashes_now$"]
+
+# ---- Phase I — pack overrides ----
+# Point each pack at the witness tool that exists in this fixture.
+[packs.secrets-leakage]
+witness_tool = "bug_log"
+witness_field = "text"
+
+[packs.unicode]
+witness_tool = "bug_log"
+witness_field = "text"
+
+[packs.large-payload]
+string_witness_tool = "bug_log"
+string_witness_field = "text"
+array_witness_tool = "bug_log"
+array_witness_field = "text"
+
+[packs.prompt-injection]
+llm_tool = "ask_llm"
+prompt_field = "prompt"
+
+[packs.injection-sql]
+query_tool = "query_db"
+query_field = "query"
+
+[packs.injection-shell]
+shell_tool = "run_shell"
+shell_field = "command"
+
+[packs.path-traversal]
+read_file_tool = "read_file"
+write_file_tool = "read_file"

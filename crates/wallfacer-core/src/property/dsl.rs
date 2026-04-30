@@ -65,6 +65,10 @@ pub enum DslError {
     /// ignoring them.
     #[error("override key `{0}` is not declared in metadata.parameters")]
     UnknownParameterOverride(String),
+    /// `for_each_tool[*].where.{name,description}_matches` regex failed
+    /// to compile.
+    #[error("invalid `where` regex: {0}")]
+    InvalidWhereRegex(String),
 }
 
 pub type Result<T> = std::result::Result<T, DslError>;
@@ -78,6 +82,100 @@ pub struct InvariantFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<PackMetadata>,
     pub invariants: Vec<Invariant>,
+    /// Phase I — schema-aware invariant templates. Each block is
+    /// expanded against the live `client.list_tools()` result at run
+    /// time, producing one concrete [`Invariant`] per matching tool.
+    /// Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub for_each_tool: Vec<ForEachToolBlock>,
+}
+
+/// Phase I — `for_each_tool` directive: a tool-name-agnostic template
+/// expanded at run time against the server's tool list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForEachToolBlock {
+    /// Invariant name template. May contain `{{tool_name}}`, replaced
+    /// at expansion time with the matched tool's name.
+    pub name: String,
+    /// Filter that decides which tools the template applies to.
+    #[serde(rename = "where")]
+    pub matches: ToolMatch,
+    /// Body of the generated invariant, minus `name` (provided by the
+    /// block) and `tool` (auto-set to the matched tool's name).
+    pub apply: ApplyTemplate,
+}
+
+/// Filter for [`ForEachToolBlock`]. Every set field is an AND condition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolMatch {
+    /// Match on `tool.annotations` fields. Each set field requires the
+    /// tool's annotation to equal the given value.
+    #[serde(default, skip_serializing_if = "ToolAnnotationMatch::is_empty")]
+    pub annotations: ToolAnnotationMatch,
+    /// Regex applied to `tool.name`. Tools whose name does not match
+    /// are skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_matches: Option<String>,
+    /// Regex applied to `tool.description`. Tools without a description
+    /// or whose description does not match are skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_matches: Option<String>,
+}
+
+/// Subset of MCP `ToolAnnotations` fields the filter understands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolAnnotationMatch {
+    #[serde(
+        default,
+        rename = "readOnlyHint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub read_only_hint: Option<bool>,
+    #[serde(
+        default,
+        rename = "destructiveHint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub destructive_hint: Option<bool>,
+    #[serde(
+        default,
+        rename = "idempotentHint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub idempotent_hint: Option<bool>,
+    #[serde(
+        default,
+        rename = "openWorldHint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub open_world_hint: Option<bool>,
+}
+
+impl ToolAnnotationMatch {
+    /// `true` when no annotation constraint is set; used by the serde
+    /// `skip_serializing_if`.
+    pub fn is_empty(&self) -> bool {
+        self.read_only_hint.is_none()
+            && self.destructive_hint.is_none()
+            && self.idempotent_hint.is_none()
+            && self.open_world_hint.is_none()
+    }
+}
+
+/// Body of a [`ForEachToolBlock`]. Mirrors [`Invariant`] minus `name`
+/// and `tool` — those are supplied by the block at expansion time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApplyTemplate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<BTreeMap<String, ValueSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<BTreeMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cases: Option<u32>,
+    #[serde(rename = "assert")]
+    pub assertions: Vec<Assertion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_fixtures: Vec<TestFixture>,
 }
 
 /// `metadata` block of a v3 invariants file. Acts as the pack header
@@ -373,6 +471,19 @@ pub fn parse_with_overrides(
         subst.insert(key.clone(), value.clone());
     }
 
+    // Phase I — when the file declares `for_each_tool` blocks, we
+    // auto-inject `tool_name` as a no-op substitution: any
+    // `{{tool_name}}` in the source is replaced by itself, so the
+    // literal `{{tool_name}}` survives parse and is later rewritten by
+    // [`expand_for_each_tool`] for each matching tool. Users that
+    // declare `tool_name` themselves (e.g. for testing) keep their own
+    // value.
+    if has_for_each_tool(&raw) {
+        subst
+            .entry("tool_name".to_string())
+            .or_insert_with(|| "{{tool_name}}".to_string());
+    }
+
     // Apply mustache substitution on the raw text. Any `{{var}}` that
     // is not in `subst` is collected and reported as a single error.
     let substituted = render_template(source, &subst)?;
@@ -388,6 +499,166 @@ pub fn parse_with_overrides(
         }
     }
     Ok(file)
+}
+
+/// Phase I — synthesises a concrete [`Invariant`] from a
+/// [`ForEachToolBlock`] template using a placeholder tool name. Used
+/// by `wallfacer pack test` to evaluate `apply.test_fixtures` offline,
+/// without consulting a live MCP server. The `where` filter is
+/// bypassed; the placeholder fills in `{{tool_name}}` everywhere.
+pub fn synthesize_for_test(block: &ForEachToolBlock, placeholder: &str) -> Result<Invariant> {
+    let yaml = serde_yaml::to_string(&block.apply)?;
+    let substituted = yaml
+        .replace("{{tool_name}}", placeholder)
+        .replace("{{ tool_name }}", placeholder);
+    let apply: ApplyTemplate = serde_yaml::from_str(&substituted)?;
+    let name = block
+        .name
+        .replace("{{tool_name}}", placeholder)
+        .replace("{{ tool_name }}", placeholder);
+    Ok(Invariant {
+        name,
+        tool: placeholder.to_string(),
+        generate: apply.generate,
+        fixed: apply.fixed,
+        cases: apply.cases,
+        assertions: apply.assertions,
+        test_fixtures: apply.test_fixtures,
+    })
+}
+
+/// Phase I — expands every [`ForEachToolBlock`] against the supplied
+/// tool list, returning one concrete [`Invariant`] per matching tool.
+///
+/// Each generated invariant has its `tool` field set to the matched
+/// tool's name; `{{tool_name}}` in the block's `name` template (or any
+/// string inside the apply body) is rewritten to that name.
+///
+/// Errors propagate from the regex pre-compile step or from the
+/// internal serde round-trip used to substitute `{{tool_name}}` deep
+/// in the apply tree.
+pub fn expand_for_each_tool(
+    blocks: &[ForEachToolBlock],
+    tools: &[rmcp::model::Tool],
+) -> Result<Vec<Invariant>> {
+    let mut out = Vec::new();
+    for block in blocks {
+        let name_re = block
+            .matches
+            .name_matches
+            .as_deref()
+            .map(Regex::new)
+            .transpose()
+            .map_err(|err| DslError::InvalidWhereRegex(err.to_string()))?;
+        let description_re = block
+            .matches
+            .description_matches
+            .as_deref()
+            .map(Regex::new)
+            .transpose()
+            .map_err(|err| DslError::InvalidWhereRegex(err.to_string()))?;
+
+        for tool in tools {
+            if !block
+                .matches
+                .matches(tool, name_re.as_ref(), description_re.as_ref())
+            {
+                continue;
+            }
+            let tool_name = tool.name.as_ref();
+            // Substitute {{tool_name}} in the apply tree by serializing
+            // the template, doing a string replace, and re-parsing. This
+            // keeps the substitution shallow but catches references in
+            // any nested string (assertion paths, fixtures, regex
+            // patterns, ...).
+            let yaml = serde_yaml::to_string(&block.apply)?;
+            let substituted = yaml
+                .replace("{{tool_name}}", tool_name)
+                .replace("{{ tool_name }}", tool_name);
+            let apply: ApplyTemplate = serde_yaml::from_str(&substituted)?;
+            let name = block
+                .name
+                .replace("{{tool_name}}", tool_name)
+                .replace("{{ tool_name }}", tool_name);
+            out.push(Invariant {
+                name,
+                tool: tool_name.to_string(),
+                generate: apply.generate,
+                fixed: apply.fixed,
+                cases: apply.cases,
+                assertions: apply.assertions,
+                test_fixtures: apply.test_fixtures,
+            });
+        }
+    }
+    Ok(out)
+}
+
+impl ToolMatch {
+    /// Returns `true` when the tool satisfies every set field on the
+    /// filter. Pre-compiled regexes are passed by the caller to avoid
+    /// recompiling per tool.
+    pub fn matches(
+        &self,
+        tool: &rmcp::model::Tool,
+        name_re: Option<&Regex>,
+        description_re: Option<&Regex>,
+    ) -> bool {
+        let annotations = tool.annotations.as_ref();
+        let check_bool = |configured: Option<bool>, actual: Option<bool>| -> bool {
+            match configured {
+                Some(want) => actual == Some(want),
+                None => true,
+            }
+        };
+        if !check_bool(
+            self.annotations.read_only_hint,
+            annotations.and_then(|a| a.read_only_hint),
+        ) {
+            return false;
+        }
+        if !check_bool(
+            self.annotations.destructive_hint,
+            annotations.and_then(|a| a.destructive_hint),
+        ) {
+            return false;
+        }
+        if !check_bool(
+            self.annotations.idempotent_hint,
+            annotations.and_then(|a| a.idempotent_hint),
+        ) {
+            return false;
+        }
+        if !check_bool(
+            self.annotations.open_world_hint,
+            annotations.and_then(|a| a.open_world_hint),
+        ) {
+            return false;
+        }
+        if let Some(re) = name_re {
+            if !re.is_match(tool.name.as_ref()) {
+                return false;
+            }
+        }
+        if let Some(re) = description_re {
+            let description = tool.description.as_deref().unwrap_or("");
+            if !re.is_match(description) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Returns `true` when the parsed YAML carries a non-empty
+/// `for_each_tool` array at the document root (Phase I).
+fn has_for_each_tool(value: &serde_yaml::Value) -> bool {
+    let key = serde_yaml::Value::String("for_each_tool".to_string());
+    value
+        .as_mapping()
+        .and_then(|m| m.get(&key))
+        .and_then(|v| v.as_sequence())
+        .is_some_and(|seq| !seq.is_empty())
 }
 
 /// Walks a parsed YAML value and pulls `metadata.parameters` out as a
@@ -801,5 +1072,140 @@ invariants:
         assert_eq!(m1.tags, m2.tags);
         assert_eq!(m1.extends, m2.extends);
         assert_eq!(m1.parameters.len(), m2.parameters.len());
+    }
+
+    // ---------- Phase I — for_each_tool ----------
+
+    fn make_tool(name: &str, read_only: Option<bool>) -> rmcp::model::Tool {
+        let mut tool = rmcp::model::Tool::new(
+            name.to_string(),
+            "test tool".to_string(),
+            std::sync::Arc::new(serde_json::Map::new()),
+        );
+        if let Some(read_only) = read_only {
+            let mut annotations = rmcp::model::ToolAnnotations::default();
+            annotations.read_only_hint = Some(read_only);
+            tool = tool.annotate(annotations);
+        }
+        tool
+    }
+
+    #[test]
+    fn for_each_tool_parses_with_auto_injected_tool_name() {
+        let source = r#"
+version: 3
+metadata:
+  name: tool-annotations
+for_each_tool:
+  - name: "tool-annotations.read_only_does_not_mutate.{{tool_name}}"
+    where:
+      annotations:
+        readOnlyHint: true
+    apply:
+      fixed: {}
+      assert:
+        - kind: matches_schema
+          path: "$.response.structuredContent"
+          schema: { type: object }
+invariants: []
+"#;
+        let file = parse(source).expect("parse");
+        assert_eq!(file.for_each_tool.len(), 1);
+        let block = &file.for_each_tool[0];
+        // The literal `{{tool_name}}` survives parsing because we
+        // auto-inject it as a no-op substitution.
+        assert!(block.name.contains("{{tool_name}}"));
+        assert_eq!(
+            block.matches.annotations.read_only_hint,
+            Some(true),
+            "where clause didn't deserialise"
+        );
+    }
+
+    #[test]
+    fn for_each_tool_expands_per_matching_tool() {
+        let source = r#"
+version: 3
+metadata:
+  name: tool-annotations
+for_each_tool:
+  - name: "rule.{{tool_name}}"
+    where:
+      annotations:
+        readOnlyHint: true
+    apply:
+      fixed: {}
+      assert:
+        - kind: equals
+          lhs: { value: 1 }
+          rhs: { value: 1 }
+invariants: []
+"#;
+        let file = parse(source).unwrap();
+        let tools = vec![
+            make_tool("read_user", Some(true)),
+            make_tool("delete_user", Some(false)),
+            make_tool("get_status", Some(true)),
+            make_tool("no_annotations", None),
+        ];
+        let expanded = expand_for_each_tool(&file.for_each_tool, &tools).unwrap();
+        let names: Vec<String> = expanded.iter().map(|i| i.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["rule.read_user".to_string(), "rule.get_status".to_string()]
+        );
+        assert_eq!(expanded[0].tool, "read_user");
+    }
+
+    #[test]
+    fn for_each_tool_filter_by_name_regex() {
+        let source = r#"
+version: 3
+for_each_tool:
+  - name: "rule.{{tool_name}}"
+    where:
+      name_matches: "^read_"
+    apply:
+      fixed: {}
+      assert: []
+invariants: []
+"#;
+        let file = parse(source).unwrap();
+        let tools = vec![
+            make_tool("read_user", None),
+            make_tool("write_user", None),
+            make_tool("read_post", None),
+        ];
+        let expanded = expand_for_each_tool(&file.for_each_tool, &tools).unwrap();
+        let names: Vec<String> = expanded.iter().map(|i| i.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["rule.read_user".to_string(), "rule.read_post".to_string()]
+        );
+    }
+
+    #[test]
+    fn for_each_tool_substitutes_in_apply_body() {
+        let source = r#"
+version: 3
+for_each_tool:
+  - name: "{{tool_name}}.contract"
+    where: {}
+    apply:
+      fixed:
+        echo_back: "{{tool_name}}"
+      assert:
+        - kind: equals
+          lhs: { path: "$.input.echo_back" }
+          rhs: { value: "{{tool_name}}" }
+invariants: []
+"#;
+        let file = parse(source).unwrap();
+        let tools = vec![make_tool("only_one", None)];
+        let expanded = expand_for_each_tool(&file.for_each_tool, &tools).unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].name, "only_one.contract");
+        let fixed = expanded[0].fixed.as_ref().unwrap();
+        assert_eq!(fixed["echo_back"], serde_json::json!("only_one"));
     }
 }

@@ -32,13 +32,54 @@ use crate::property::dsl::{parse_with_overrides, DslError, InvariantFile, MAX_EX
 pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
     ("auth", include_str!("../../../../packs/auth.yaml")),
     (
-        "path-traversal",
-        include_str!("../../../../packs/path-traversal.yaml"),
+        "authorization",
+        include_str!("../../../../packs/authorization.yaml"),
     ),
     (
         "error-shape",
         include_str!("../../../../packs/error-shape.yaml"),
     ),
+    (
+        "idempotency",
+        include_str!("../../../../packs/idempotency.yaml"),
+    ),
+    (
+        "injection-shell",
+        include_str!("../../../../packs/injection-shell.yaml"),
+    ),
+    (
+        "injection-sql",
+        include_str!("../../../../packs/injection-sql.yaml"),
+    ),
+    (
+        "large-payload",
+        include_str!("../../../../packs/large-payload.yaml"),
+    ),
+    (
+        "pagination",
+        include_str!("../../../../packs/pagination.yaml"),
+    ),
+    (
+        "path-traversal",
+        include_str!("../../../../packs/path-traversal.yaml"),
+    ),
+    (
+        "prompt-injection",
+        include_str!("../../../../packs/prompt-injection.yaml"),
+    ),
+    (
+        "rate-limit",
+        include_str!("../../../../packs/rate-limit.yaml"),
+    ),
+    (
+        "secrets-leakage",
+        include_str!("../../../../packs/secrets-leakage.yaml"),
+    ),
+    (
+        "tool-annotations",
+        include_str!("../../../../packs/tool-annotations.yaml"),
+    ),
+    ("unicode", include_str!("../../../../packs/unicode.yaml")),
 ];
 
 /// Returns an iterator over the names of all embedded packs.
@@ -185,6 +226,7 @@ fn resolve_inner(
     }
 
     let mut imported: Vec<crate::property::dsl::Invariant> = Vec::new();
+    let mut imported_for_each: Vec<crate::property::dsl::ForEachToolBlock> = Vec::new();
     for parent_name in extends {
         if !visited.insert(parent_name.clone()) {
             return Err(PackError::Cycle(parent_name));
@@ -200,11 +242,14 @@ fn resolve_inner(
         // longer "on the current path" for cycle detection purposes.
         visited.remove(&parent_name);
         imported.extend(parent.invariants);
+        imported_for_each.extend(parent.for_each_tool);
     }
 
     // Imported first, primary last — primary overrides on collision.
     imported.append(&mut file.invariants);
     file.invariants = imported;
+    imported_for_each.append(&mut file.for_each_tool);
+    file.for_each_tool = imported_for_each;
     Ok(file)
 }
 

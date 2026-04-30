@@ -85,6 +85,57 @@ TOOLS = [
         "description": "BUG: reads global shared session state.",
         "inputSchema": object_schema({"key": {"type": "string"}}),
     },
+    # ---- Phase I — bugs each rule pack should catch ----
+    # secrets-leakage / prompt-injection / unicode witness:
+    # `bug_log` echoes its input verbatim. A real "log" tool wouldn't.
+    {
+        "name": "bug_log",
+        "description": "BUG: echoes input verbatim including secrets and escape sequences.",
+        "inputSchema": object_schema({"text": {"type": "string"}}),
+    },
+    # path-traversal: leaks /etc/passwd content for `..` paths.
+    {
+        "name": "read_file",
+        "description": "BUG: vulnerable to path traversal; leaks /etc/passwd on `..` paths.",
+        "inputSchema": object_schema({"path": {"type": "string"}}),
+    },
+    # injection-sql: confirms DROP TABLE for SQLi payloads.
+    {
+        "name": "query_db",
+        "description": "BUG: confirms DROP TABLE on SQL injection.",
+        "inputSchema": object_schema({"query": {"type": "string"}}),
+    },
+    # injection-shell: executes whoami / id when chained.
+    {
+        "name": "run_shell",
+        "description": "BUG: shell-injection vulnerable; runs `whoami` etc.",
+        "inputSchema": object_schema({"command": {"type": "string"}}),
+    },
+    # prompt-injection: leaks system prompt on injection.
+    {
+        "name": "ask_llm",
+        "description": "BUG: leaks system prompt when asked to ignore previous instructions.",
+        "inputSchema": object_schema({"prompt": {"type": "string"}}),
+    },
+    # tool-annotations: declares readOnlyHint=true but always errors.
+    {
+        "name": "broken_reader",
+        "description": "BUG: readOnlyHint=true annotation lies; tool always errors.",
+        "inputSchema": object_schema({}, []),
+        "annotations": {
+            "readOnlyHint": True,
+        },
+    },
+    # idempotency / tool-annotations: idempotentHint=true but envelope
+    # is missing isError + structuredContent.
+    {
+        "name": "list_active_users",
+        "description": "BUG: idempotentHint=true but malformed envelope.",
+        "inputSchema": object_schema({}, []),
+        "annotations": {
+            "idempotentHint": True,
+        },
+    },
 ]
 
 
@@ -137,6 +188,49 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return structured_result({"ok": True})
     if name == "session_get":
         return structured_result({"value": SESSIONS.get(str(args["key"]))})
+    # ---- Phase I extensions ----
+    if name == "bug_log":
+        return text_result(str(args.get("text", "")))
+    if name == "read_file":
+        path = str(args.get("path", ""))
+        if "etc" in path or "passwd" in path or path.startswith("/"):
+            return text_result(
+                "root:x:0:0:root:/root:/bin/bash\nnobody:x:1:1::/:/bin/sh"
+            )
+        return text_result("file content")
+    if name == "query_db":
+        query = str(args.get("query", "")).lower()
+        if "drop table" in query:
+            return text_result("Table users dropped.")
+        if "union select" in query and "password" in query:
+            return text_result("alice $2b$12$abcdefghijklmnopqrstuv")
+        return text_result("0 rows")
+    if name == "run_shell":
+        cmd = str(args.get("command", ""))
+        if (
+            "whoami" in cmd
+            or "$(id)" in cmd
+            or "`whoami`" in cmd
+            or "&& cat /etc/passwd" in cmd
+        ):
+            return text_result(
+                "uid=0(root) gid=0(root)\nroot:x:0:0:root:/root:/bin/bash"
+            )
+        return text_result(cmd)
+    if name == "ask_llm":
+        prompt = str(args.get("prompt", "")).lower()
+        if "system prompt" in prompt or "ignore previous" in prompt:
+            return text_result(
+                "My system prompt: <|system|>You are an assistant<|im_end|>"
+            )
+        if "/etc/passwd" in prompt:
+            return text_result("Here is /etc/passwd:\nroot:x:0:0:root:/root:/bin/bash")
+        return text_result("response")
+    if name == "broken_reader":
+        return text_result("read failed", is_error=True)
+    if name == "list_active_users":
+        # idempotentHint=true but envelope omits isError + structuredContent.
+        return {"content": [{"type": "text", "text": "alice, bob"}]}
     return text_result(f"unknown tool: {name}", is_error=True)
 
 

@@ -19,7 +19,7 @@ use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use wallfacer_core::{
     property::{
-        dsl::{parse_with_overrides, FixtureExpect, InvariantFile},
+        dsl::{parse_with_overrides, synthesize_for_test, FixtureExpect, InvariantFile},
         runner::{evaluate_fixture, FixtureOutcome},
     },
     run::{embedded_pack_names, embedded_pack_source},
@@ -327,31 +327,64 @@ fn run_pack_fixtures(
 ) -> usize {
     let mut total = 0usize;
     for invariant in &file.invariants {
-        for fixture in &invariant.test_fixtures {
-            total += 1;
-            match evaluate_fixture(invariant, fixture) {
-                FixtureOutcome::Match => *matched += 1,
-                FixtureOutcome::Mismatch {
-                    expected,
-                    observed,
-                    detail,
-                } => failures.push(TestFailure {
+        total += run_invariant_fixtures(pack_name, invariant, matched, failures);
+    }
+    // Phase I: also evaluate `apply.test_fixtures` of every for_each_tool
+    // block. We synthesize a placeholder-tooled Invariant from each
+    // block so `pack test` can validate the assertion logic without
+    // contacting an MCP server. The placeholder is reflected in the
+    // failure rows so authors see "(synth)" rather than a real tool.
+    for block in &file.for_each_tool {
+        let synth = match synthesize_for_test(block, "__pack_test__") {
+            Ok(synth) => synth,
+            Err(err) => {
+                failures.push(TestFailure {
                     pack: pack_name.to_string(),
-                    invariant: invariant.name.clone(),
-                    fixture: fixture.name.clone(),
-                    expected,
-                    observed: Some(observed),
-                    detail,
-                }),
-                FixtureOutcome::Structural { error } => failures.push(TestFailure {
-                    pack: pack_name.to_string(),
-                    invariant: invariant.name.clone(),
-                    fixture: fixture.name.clone(),
-                    expected: fixture.expect,
+                    invariant: block.name.clone(),
+                    fixture: "<synthesize>".to_string(),
+                    expected: FixtureExpect::Pass,
                     observed: None,
-                    detail: format!("(structural error) {error}"),
-                }),
+                    detail: format!("(synthesize failed) {err}"),
+                });
+                continue;
             }
+        };
+        total += run_invariant_fixtures(pack_name, &synth, matched, failures);
+    }
+    total
+}
+
+fn run_invariant_fixtures(
+    pack_name: &str,
+    invariant: &wallfacer_core::property::dsl::Invariant,
+    matched: &mut usize,
+    failures: &mut Vec<TestFailure>,
+) -> usize {
+    let mut total = 0usize;
+    for fixture in &invariant.test_fixtures {
+        total += 1;
+        match evaluate_fixture(invariant, fixture) {
+            FixtureOutcome::Match => *matched += 1,
+            FixtureOutcome::Mismatch {
+                expected,
+                observed,
+                detail,
+            } => failures.push(TestFailure {
+                pack: pack_name.to_string(),
+                invariant: invariant.name.clone(),
+                fixture: fixture.name.clone(),
+                expected,
+                observed: Some(observed),
+                detail,
+            }),
+            FixtureOutcome::Structural { error } => failures.push(TestFailure {
+                pack: pack_name.to_string(),
+                invariant: invariant.name.clone(),
+                fixture: fixture.name.clone(),
+                expected: fixture.expect,
+                observed: None,
+                detail: format!("(structural error) {error}"),
+            }),
         }
     }
     total

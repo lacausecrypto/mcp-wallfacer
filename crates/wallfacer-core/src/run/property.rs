@@ -53,23 +53,34 @@ impl PropertyPlan {
         corpus: &Corpus,
         reporter: &mut dyn Reporter,
     ) -> Result<PropertyReport> {
-        // Phase D bumped MAX_VERSION to 2; the parser already rejects
-        // anything higher than that. Plans accept v1 and v2 transparently.
         if self.file.version == 0 || self.file.version > crate::property::dsl::MAX_VERSION {
             bail!("unsupported invariants version {}", self.file.version);
         }
-        let total_cases: u64 = self
-            .file
-            .invariants
+
+        // Phase I — query the live tool list once and expand every
+        // `for_each_tool` block against it. Expanded invariants are
+        // appended to the static ones; from this point on the loop
+        // doesn't distinguish them.
+        let mut all_invariants = self.file.invariants.clone();
+        if !self.file.for_each_tool.is_empty() {
+            let tools = client
+                .list_tools()
+                .await
+                .context("failed to list tools for `for_each_tool` expansion")?;
+            let expanded =
+                crate::property::dsl::expand_for_each_tool(&self.file.for_each_tool, &tools)
+                    .context("failed to expand `for_each_tool` blocks")?;
+            all_invariants.extend(expanded);
+        }
+
+        let total_cases: u64 = all_invariants
             .iter()
             .map(|invariant| invariant.cases.unwrap_or(self.default_cases).max(1) as u64)
             .sum();
         reporter.on_run_start(&RunInfo {
             kind: "property",
             total_iterations: total_cases,
-            tools: self
-                .file
-                .invariants
+            tools: all_invariants
                 .iter()
                 .map(|invariant| invariant.tool.clone())
                 .collect(),
@@ -78,7 +89,7 @@ impl PropertyPlan {
         });
 
         let mut report = PropertyReport::default();
-        for invariant in &self.file.invariants {
+        for invariant in &all_invariants {
             let cases = invariant.cases.unwrap_or(self.default_cases).max(1);
             for case_index in 0..cases {
                 reporter.on_iteration_start(&invariant.tool, case_index as u64);

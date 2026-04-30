@@ -45,7 +45,7 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.response.content[0].text"
-              pattern: "{{sensitive_unix_pattern}}"
+              pattern: '{{sensitive_unix_pattern}}'
     test_fixtures:
       - name: "passes when traversal is rejected"
         response: { isError: true, content: [{ type: "text", text: "invalid path" }] }
@@ -130,7 +130,7 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.response.content[0].text"
-              pattern: "{{sensitive_unix_pattern}}"
+              pattern: '{{sensitive_unix_pattern}}'
     test_fixtures:
       - name: "passes when encoded traversal rejected"
         response: { isError: true }

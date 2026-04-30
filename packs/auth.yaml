@@ -92,7 +92,7 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.item.uri"
-              pattern: "{{admin_path_pattern}}"
+              pattern: '{{admin_path_pattern}}'
     test_fixtures:
       - name: "passes with non-admin uris"
         response:
