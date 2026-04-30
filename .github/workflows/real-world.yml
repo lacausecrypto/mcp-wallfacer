@@ -55,7 +55,13 @@ jobs:
               - large-payload
               - error-shape
               - tool-annotations
-        pack: ${{ fromJSON('["secrets-leakage", "unicode", "large-payload", "error-shape", "tool-annotations", "path-traversal"]') }}
+        pack:
+          - secrets-leakage
+          - unicode
+          - large-payload
+          - error-shape
+          - tool-annotations
+          - path-traversal
         # Filter: only run a (target, pack) pair when the pack is in the
         # target's `packs` list above.
         include: []
