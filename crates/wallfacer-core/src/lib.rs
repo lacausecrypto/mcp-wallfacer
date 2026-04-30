@@ -3,6 +3,7 @@ pub mod corpus;
 pub mod differential;
 pub mod finding;
 pub mod mutate;
+pub mod property;
 pub mod seed;
 pub mod target;
 

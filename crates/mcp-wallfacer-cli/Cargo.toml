@@ -38,3 +38,7 @@ path = "../../tests/e2e/fuzz_finds_crash.rs"
 [[test]]
 name = "differential_catches_drift"
 path = "../../tests/e2e/differential_catches_drift.rs"
+
+[[test]]
+name = "property_runs"
+path = "../../tests/e2e/property_runs.rs"
