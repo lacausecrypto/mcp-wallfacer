@@ -1,3 +1,7 @@
+pub mod client;
+pub mod finding;
+pub mod target;
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -1,0 +1,9 @@
+[target]
+kind = "stdio"
+command = "python3"
+args = ["tests/fixtures/buggy_server.py"]
+timeout_ms = 5000
+
+[output]
+corpus_dir = ".wallfacer/corpus"
+

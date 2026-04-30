@@ -1,0 +1,31 @@
+version: 1
+invariants:
+  - name: "echo returns input verbatim"
+    tool: echo
+    generate:
+      text: { type: string, max_length: 1000 }
+    assert:
+      - kind: equals
+        lhs: "$.response.content[0].text"
+        rhs: "$.input.text"
+
+  - name: "paginate respects limit"
+    tool: paginate
+    generate:
+      page:  { type: integer, min: 0, max: 100 }
+      limit: { type: integer, min: 1, max: 50 }
+    assert:
+      - kind: length_at_most
+        path: "$.response.structuredContent.items"
+        value: "$.input.limit"
+
+  - name: "divide(_, 0) returns isError"
+    tool: divide
+    fixed:
+      a: 10
+      b: 0
+    assert:
+      - kind: equals
+        lhs: "$.response.isError"
+        rhs: true
+

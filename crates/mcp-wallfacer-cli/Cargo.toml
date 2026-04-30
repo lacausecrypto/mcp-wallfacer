@@ -13,6 +13,7 @@ path = "src/main.rs"
 wallfacer-core = { path = "../wallfacer-core" }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
+comfy-table = "7"
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -20,3 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+
+[[test]]
+name = "doctor_lists_tools"
+path = "../../tests/e2e/doctor_lists_tools.rs"
