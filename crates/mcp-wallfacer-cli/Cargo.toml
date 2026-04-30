@@ -71,3 +71,7 @@ path = "tests/e2e/pack_test_all.rs"
 [[test]]
 name = "phase_i_acceptance"
 path = "tests/e2e/phase_i_acceptance.rs"
+
+[[test]]
+name = "phase_j_acceptance"
+path = "tests/e2e/phase_j_acceptance.rs"

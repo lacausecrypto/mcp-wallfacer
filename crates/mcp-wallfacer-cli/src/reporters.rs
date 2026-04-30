@@ -6,13 +6,13 @@
 //! plan and never make MCP calls themselves — they only translate plan
 //! events into operator-facing output.
 
-use std::io::IsTerminal;
+use std::{collections::BTreeMap, io::IsTerminal};
 
 use comfy_table::{presets::UTF8_FULL, Cell, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use wallfacer_core::{
-    finding::Finding,
+    finding::{Finding, FindingKind},
     run::{Reporter, RunInfo},
     sarif,
 };
@@ -28,6 +28,11 @@ pub struct HumanReporter {
     /// `true` when stderr is a TTY; controls whether we render the progress
     /// bar at all (CI logs prefer plain "Found 3 findings" output).
     tty: bool,
+    /// Phase J — invariant name → source pack name. Set when the
+    /// reporter is built by `wallfacer property --pack ...`. When
+    /// non-empty, `on_run_end` groups findings by pack instead of
+    /// emitting a single flat table.
+    invariant_to_pack: BTreeMap<String, String>,
 }
 
 impl HumanReporter {
@@ -39,7 +44,16 @@ impl HumanReporter {
             blocked: Vec::new(),
             started: false,
             tty: std::io::stderr().is_terminal(),
+            invariant_to_pack: BTreeMap::new(),
         }
+    }
+
+    /// Phase J — supply the invariant-name → pack-name index produced
+    /// by `compose_invariants`. Enables grouped output at `on_run_end`.
+    #[must_use]
+    pub fn with_invariant_pack_index(mut self, index: BTreeMap<String, String>) -> Self {
+        self.invariant_to_pack = index;
+        self
     }
 }
 
@@ -92,14 +106,54 @@ impl Reporter for HumanReporter {
         }
         let mut findings_table = Table::new();
         findings_table.load_preset(UTF8_FULL);
-        findings_table.set_header(vec!["Tool", "Kind", "Severity", "Message"]);
-        for finding in &self.findings {
-            findings_table.add_row(vec![
-                Cell::new(&finding.tool),
-                Cell::new(format!("{:?}", finding.kind)),
-                Cell::new(format!("{:?}", finding.severity)),
-                Cell::new(&finding.message),
-            ]);
+        if self.invariant_to_pack.is_empty() {
+            // Single-source mode: same flat table as before Phase J.
+            findings_table.set_header(vec!["Tool", "Kind", "Severity", "Message"]);
+            for finding in &self.findings {
+                findings_table.add_row(vec![
+                    Cell::new(&finding.tool),
+                    Cell::new(format!("{:?}", finding.kind)),
+                    Cell::new(format!("{:?}", finding.severity)),
+                    Cell::new(&finding.message),
+                ]);
+            }
+        } else {
+            // Multi-pack mode: group rows by source pack so operators
+            // see immediately which rule pack flagged what. Sort packs
+            // alphabetically; within a pack, preserve discovery order.
+            findings_table.set_header(vec!["Pack", "Tool", "Kind", "Severity", "Message"]);
+            let mut by_pack: BTreeMap<String, Vec<&Finding>> = BTreeMap::new();
+            let mut unknown: Vec<&Finding> = Vec::new();
+            for finding in &self.findings {
+                let invariant = match &finding.kind {
+                    FindingKind::PropertyFailure { invariant } => invariant.clone(),
+                    _ => String::new(),
+                };
+                match self.invariant_to_pack.get(&invariant) {
+                    Some(pack) => by_pack.entry(pack.clone()).or_default().push(finding),
+                    None => unknown.push(finding),
+                }
+            }
+            for (pack, findings) in &by_pack {
+                for finding in findings {
+                    findings_table.add_row(vec![
+                        Cell::new(pack),
+                        Cell::new(&finding.tool),
+                        Cell::new(format!("{:?}", finding.kind)),
+                        Cell::new(format!("{:?}", finding.severity)),
+                        Cell::new(&finding.message),
+                    ]);
+                }
+            }
+            for finding in unknown {
+                findings_table.add_row(vec![
+                    Cell::new("(unknown)"),
+                    Cell::new(&finding.tool),
+                    Cell::new(format!("{:?}", finding.kind)),
+                    Cell::new(format!("{:?}", finding.severity)),
+                    Cell::new(&finding.message),
+                ]);
+            }
         }
         println!("{findings_table}");
         if !self.skipped.is_empty() {

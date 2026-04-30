@@ -75,6 +75,7 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "secrets-leakage",
         include_str!("../../../../packs/secrets-leakage.yaml"),
     ),
+    ("security", include_str!("../../../../packs/security.yaml")),
     (
         "tool-annotations",
         include_str!("../../../../packs/tool-annotations.yaml"),
