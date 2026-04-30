@@ -14,6 +14,7 @@ wallfacer-core = { path = "../wallfacer-core" }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 comfy-table = "7"
+futures = "0.3"
 indicatif = "0.18"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 rand = "0.10"
@@ -42,3 +43,7 @@ path = "../../tests/e2e/differential_catches_drift.rs"
 [[test]]
 name = "property_runs"
 path = "../../tests/e2e/property_runs.rs"
+
+[[test]]
+name = "torture_finds_race"
+path = "../../tests/e2e/torture_finds_race.rs"

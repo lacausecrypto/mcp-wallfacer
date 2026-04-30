@@ -1058,6 +1058,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "comfy-table",
+ "futures",
  "indicatif",
  "jsonschema",
  "predicates",
