@@ -253,13 +253,8 @@ async def handle_request(message: Dict[str, Any]) -> None:
 
 
 async def main() -> None:
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(limit=32 * 1024 * 1024)
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
     while True:
-        line = await reader.readline()
+        line = await asyncio.to_thread(sys.stdin.buffer.readline)
         if not line:
             break
         try:

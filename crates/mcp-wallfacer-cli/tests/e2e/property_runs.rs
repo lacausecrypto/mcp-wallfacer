@@ -1,5 +1,6 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
+use std::time::Duration;
 
 #[test]
 fn property_reports_single_paginate_failure() {
@@ -19,6 +20,7 @@ fn property_reports_single_paginate_failure() {
             "42",
             "tests/fixtures/invariants_sample.yaml",
         ])
+        .timeout(Duration::from_secs(30))
         .assert()
         .failure()
         .get_output()

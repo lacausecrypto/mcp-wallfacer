@@ -1,6 +1,7 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
 use serde_json::Value;
+use std::time::Duration;
 
 #[test]
 fn differential_learns_then_reports_schema_violations() {
@@ -16,6 +17,7 @@ fn differential_learns_then_reports_schema_violations() {
             "tests/fixtures/wallfacer.toml",
             "--learn",
         ])
+        .timeout(Duration::from_secs(30))
         .assert()
         .success()
         .stdout(contains("learned"));
@@ -32,6 +34,7 @@ fn differential_learns_then_reports_schema_violations() {
             "--seed",
             "42",
         ])
+        .timeout(Duration::from_secs(30))
         .assert()
         .failure()
         .get_output()

@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use std::time::Duration;
 
 #[test]
 fn fuzz_finds_multiple_bug_classes() {
@@ -17,6 +18,7 @@ fn fuzz_finds_multiple_bug_classes() {
             "--iterations",
             "500",
         ])
+        .timeout(Duration::from_secs(60))
         .assert()
         .failure();
 

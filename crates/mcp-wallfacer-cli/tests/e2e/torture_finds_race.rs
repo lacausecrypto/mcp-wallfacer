@@ -1,5 +1,6 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
+use std::time::Duration;
 
 #[test]
 fn torture_finds_counter_race_and_state_leak() {
@@ -24,6 +25,7 @@ fn torture_finds_counter_race_and_state_leak() {
             "--format",
             "json",
         ])
+        .timeout(Duration::from_secs(30))
         .assert()
         .failure()
         .get_output()
@@ -50,6 +52,7 @@ fn torture_finds_counter_race_and_state_leak() {
             "--format",
             "json",
         ])
+        .timeout(Duration::from_secs(30))
         .assert()
         .failure()
         .get_output()

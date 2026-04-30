@@ -1,5 +1,6 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::str::contains;
+use std::time::Duration;
 
 #[test]
 fn doctor_lists_echo_tool() {
@@ -8,6 +9,7 @@ fn doctor_lists_echo_tool() {
 
     cmd.current_dir(workspace_root)
         .args(["doctor", "--config", "tests/fixtures/wallfacer.toml"])
+        .timeout(Duration::from_secs(20))
         .assert()
         .success()
         .stdout(contains("echo"));
