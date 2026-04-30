@@ -19,7 +19,9 @@ use serde_json::{json, Map, Number, Value};
 use thiserror::Error;
 
 use super::{
-    dsl::{Assertion, Invariant, JsonType, Operand, ValueKind, ValueSpec},
+    dsl::{
+        Assertion, FixtureExpect, Invariant, JsonType, Operand, TestFixture, ValueKind, ValueSpec,
+    },
     jsonpath,
 };
 
@@ -81,6 +83,67 @@ pub fn evaluate(invariant: &Invariant, input: Value, response: Value) -> Result<
         evaluate_assertion(assertion, &context)?;
     }
     Ok(())
+}
+
+/// Outcome of [`evaluate_fixture`]: the comparison between what the
+/// fixture asked for and what the runner actually produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixtureOutcome {
+    /// Observed matches `expected`; this fixture passed.
+    Match,
+    /// Observed differs from `expected`; this fixture failed.
+    Mismatch {
+        /// What the fixture said should happen.
+        expected: FixtureExpect,
+        /// What the runner actually observed.
+        observed: FixtureExpect,
+        /// Human-readable detail (assertion message when the runner
+        /// returned `Err`, empty string on `Ok`).
+        detail: String,
+    },
+    /// The runner returned a structural error (bad path, malformed
+    /// regex / schema). The invariant itself is broken — this fixture
+    /// can neither pass nor fail meaningfully.
+    Structural {
+        /// Pass-through of the structural error.
+        error: String,
+    },
+}
+
+/// Phase H — evaluates an invariant against a synthetic
+/// `(input, response)` pair scripted by a [`TestFixture`] and reports
+/// whether the observed outcome matches the fixture's `expect`.
+pub fn evaluate_fixture(invariant: &Invariant, fixture: &TestFixture) -> FixtureOutcome {
+    let input = fixture.input.clone().unwrap_or_else(|| {
+        let map = invariant
+            .fixed
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<serde_json::Map<_, _>>();
+        Value::Object(map)
+    });
+    match evaluate(invariant, input, fixture.response.clone()) {
+        Ok(()) => match fixture.expect {
+            FixtureExpect::Pass => FixtureOutcome::Match,
+            FixtureExpect::Fail => FixtureOutcome::Mismatch {
+                expected: FixtureExpect::Fail,
+                observed: FixtureExpect::Pass,
+                detail: String::new(),
+            },
+        },
+        Err(RunnerError::Assertion(message)) => match fixture.expect {
+            FixtureExpect::Fail => FixtureOutcome::Match,
+            FixtureExpect::Pass => FixtureOutcome::Mismatch {
+                expected: FixtureExpect::Pass,
+                observed: FixtureExpect::Fail,
+                detail: message,
+            },
+        },
+        Err(other) => FixtureOutcome::Structural {
+            error: other.to_string(),
+        },
+    }
 }
 
 fn evaluate_assertion(assertion: &Assertion, context: &Value) -> Result<()> {
@@ -157,11 +220,17 @@ fn evaluate_assertion(assertion: &Assertion, context: &Value) -> Result<()> {
             Ok(()) => Err(RunnerError::Assertion(
                 "expected child assertion to fail under `not`".to_string(),
             )),
-            // Re-raise structural errors (bad path / regex / schema): a
-            // failing child *is* OK semantically only when the child
-            // produced an `Assertion` failure. Anything else means the
-            // invariant itself is malformed.
+            // A failing child *is* OK semantically when:
+            //  - it produced an `Assertion` failure;
+            //  - it referenced a path that did not resolve. Missing
+            //    paths are equivalent to "child assertion does not
+            //    hold" rather than a malformed invariant — promoting
+            //    them to hard errors would make `not(matches_regex
+            //    path=...)` surprising whenever the path is absent.
+            // Other errors (regex compile, schema compile, malformed
+            // YAML) are genuinely structural and propagate.
             Err(RunnerError::Assertion(_)) => Ok(()),
+            Err(RunnerError::JsonPath(jsonpath::JsonPathError::Missing(_))) => Ok(()),
             Err(other) => Err(other),
         },
         Assertion::ForEach { path, assertions } => evaluate_for_each(path, assertions, context),
@@ -198,9 +267,13 @@ fn evaluate_any_of(assertions: &[Assertion], context: &Value) -> Result<()> {
             Err(RunnerError::Assertion(message)) => {
                 last_assertion_error = Some(message);
             }
-            // Structural errors (path / regex / schema) propagate even from
-            // inside `any_of`: they signal a broken invariant, not a
-            // failed-but-recoverable assertion.
+            // A missing path inside one branch of `any_of` simply means
+            // "this branch does not apply" — try the next one. Other
+            // structural errors (regex compile, schema compile) signal
+            // a broken invariant and propagate.
+            Err(RunnerError::JsonPath(jsonpath::JsonPathError::Missing(path))) => {
+                last_assertion_error = Some(format!("path `{path}` did not resolve"));
+            }
             Err(other) => return Err(other),
         }
     }

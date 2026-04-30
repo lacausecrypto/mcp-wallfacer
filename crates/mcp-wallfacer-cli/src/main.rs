@@ -34,6 +34,9 @@ enum Command {
     Replay(commands::replay::ReplayArgs),
     /// Compare two corpus directories and report regressions / fixes.
     Diff(commands::diff::DiffArgs),
+    /// Manage rule packs: list, show, init, test (offline fixture
+    /// runner), params.
+    Pack(commands::pack::PackArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -54,6 +57,7 @@ async fn main() -> Result<()> {
         Some(Command::Ci(args)) => commands::ci::run(args, cli.config.as_deref()).await,
         Some(Command::Replay(args)) => commands::replay::run(args, cli.config.as_deref()).await,
         Some(Command::Diff(args)) => commands::diff::run(args).await,
+        Some(Command::Pack(args)) => commands::pack::run(args, cli.config.as_deref()).await,
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())

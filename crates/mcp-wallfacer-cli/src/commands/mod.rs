@@ -5,6 +5,7 @@ pub mod differential;
 pub mod doctor;
 pub mod fuzz;
 pub mod init;
+pub mod pack;
 pub mod property;
 pub mod replay;
 pub mod torture;

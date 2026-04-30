@@ -7,6 +7,11 @@
 //! YAML actually lives on disk (workspace `packs/` directory or, in
 //! Phase H, embedded into the binary).
 //!
+//! Phase H bundles the standard packs into the binary via
+//! [`EMBEDDED_PACKS`] / [`EmbeddedLoader`]. `wallfacer pack init` copies
+//! one out into the workspace for customisation; `wallfacer pack list`
+//! enumerates both layers.
+//!
 //! Resolution order: every pack listed in `metadata.extends` (and
 //! transitively) is loaded and its invariants are prepended to the
 //! primary file's, so the primary file gets the last word when names
@@ -18,6 +23,38 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::property::dsl::{parse_with_overrides, DslError, InvariantFile, MAX_EXTENDS_DEPTH};
+
+/// Standard packs bundled into every `wallfacer` binary at compile time.
+///
+/// The slice is `(name, raw YAML)`; lookup is by `name`. Adding a new
+/// embedded pack is a one-liner here plus a YAML file under
+/// `<workspace>/packs/<name>.yaml`.
+pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
+    ("auth", include_str!("../../../../packs/auth.yaml")),
+    (
+        "path-traversal",
+        include_str!("../../../../packs/path-traversal.yaml"),
+    ),
+    (
+        "error-shape",
+        include_str!("../../../../packs/error-shape.yaml"),
+    ),
+];
+
+/// Returns an iterator over the names of all embedded packs.
+pub fn embedded_pack_names() -> impl Iterator<Item = &'static str> {
+    EMBEDDED_PACKS.iter().map(|(name, _)| *name)
+}
+
+/// Looks up the raw YAML source of an embedded pack by name. Returns
+/// `None` when the name is unknown — callers typically pass through to
+/// a workspace lookup or surface a "pack not found" error.
+pub fn embedded_pack_source(name: &str) -> Option<&'static str> {
+    EMBEDDED_PACKS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, source)| *source)
+}
 
 /// Side of an error: was it the parser, or did the loader callback fail?
 #[derive(Debug, Error)]
@@ -56,6 +93,52 @@ where
 {
     fn load(&self, name: &str) -> std::result::Result<String, String> {
         self(name)
+    }
+}
+
+/// `PackLoader` impl backed by the [`EMBEDDED_PACKS`] table compiled
+/// into the binary. Used standalone in tests, or stacked behind a
+/// workspace loader by the CLI.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmbeddedLoader;
+
+impl PackLoader for EmbeddedLoader {
+    fn load(&self, name: &str) -> std::result::Result<String, String> {
+        embedded_pack_source(name)
+            .map(|source| source.to_string())
+            .ok_or_else(|| format!("no embedded pack named `{name}`"))
+    }
+}
+
+/// Loader that delegates to a primary loader and falls back to a
+/// secondary one when the primary returns "not found". The CLI uses
+/// this with the workspace `packs/` directory as primary and
+/// [`EmbeddedLoader`] as secondary, so workspace-vendored packs always
+/// shadow built-ins of the same name.
+pub struct LayeredLoader<P: PackLoader, S: PackLoader> {
+    /// Primary lookup; takes precedence over `secondary`.
+    pub primary: P,
+    /// Fallback lookup, used when `primary.load(...)` returns `Err`.
+    pub secondary: S,
+}
+
+impl<P: PackLoader, S: PackLoader> LayeredLoader<P, S> {
+    /// Builds a layered loader from any pair of primary / secondary
+    /// loaders.
+    pub fn new(primary: P, secondary: S) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl<P: PackLoader, S: PackLoader> PackLoader for LayeredLoader<P, S> {
+    fn load(&self, name: &str) -> std::result::Result<String, String> {
+        match self.primary.load(name) {
+            Ok(source) => Ok(source),
+            Err(primary_err) => self
+                .secondary
+                .load(name)
+                .map_err(|secondary_err| format!("{primary_err}; {secondary_err}")),
+        }
     }
 }
 

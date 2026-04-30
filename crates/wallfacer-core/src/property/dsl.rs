@@ -155,6 +155,47 @@ pub struct Invariant {
     pub cases: Option<u32>,
     #[serde(rename = "assert")]
     pub assertions: Vec<Assertion>,
+    /// Phase H — inline test fixtures for `wallfacer pack test`. Each
+    /// fixture provides a synthetic response (and optionally an
+    /// overriding input) along with whether evaluating the invariant
+    /// against it should `pass` or `fail`. The runner compares the
+    /// observed outcome to `expect` and surfaces mismatches as test
+    /// failures, gating CI on pack quality without needing a live MCP
+    /// server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_fixtures: Vec<TestFixture>,
+}
+
+/// One scripted test case for an invariant: a synthetic response (and
+/// optional input override) plus the expected outcome. Phase H —
+/// consumed by `wallfacer pack test`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestFixture {
+    /// Free-form short label, surfaced in the `pack test` output table.
+    pub name: String,
+    /// Optional override for `$.input`. When omitted, the fixture
+    /// uses the invariant's `fixed` block (or an empty object if both
+    /// are absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    /// Synthetic response value used as `$.response` during evaluation.
+    pub response: Value,
+    /// Outcome the runner expects when evaluating the invariant against
+    /// this fixture.
+    pub expect: FixtureExpect,
+}
+
+/// Outcome enum for [`TestFixture::expect`]. `Pass` means the invariant
+/// must succeed; `Fail` means the invariant must report an assertion
+/// failure (a structural error like a bad path is treated as a third
+/// category and surfaced as a test failure of its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FixtureExpect {
+    /// Invariant evaluation must return `Ok(())`.
+    Pass,
+    /// Invariant evaluation must return `Err(RunnerError::Assertion(...))`.
+    Fail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

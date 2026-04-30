@@ -5,7 +5,7 @@ use clap::{Args, ValueEnum};
 use wallfacer_core::{
     client::Client,
     corpus::Corpus,
-    run::{resolve_pack, PackLoader, PropertyPlan, Reporter},
+    run::{resolve_pack, EmbeddedLoader, LayeredLoader, PackLoader, PropertyPlan, Reporter},
     target::Config,
 };
 
@@ -48,7 +48,9 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
 
     let primary_source = load_primary_source(&args, &workspace)?;
     let overrides = build_overrides(&args, &config)?;
-    let loader = WorkspacePackLoader { workspace };
+    // Phase H: workspace `packs/` shadows embedded — same lookup order
+    // as the new `wallfacer pack` commands.
+    let loader = LayeredLoader::new(WorkspacePackLoader { workspace }, EmbeddedLoader);
     let file = resolve_pack(&primary_source, &overrides, &loader)
         .context("failed to resolve invariants / pack chain")?;
 
@@ -93,7 +95,8 @@ fn workspace_root(config_file: &Path) -> PathBuf {
 
 /// Loads the primary invariants YAML source — either an explicit file
 /// from `args.invariants`, or the workspace's `packs/<name>.yaml` when
-/// `--pack <name>` was passed.
+/// `--pack <name>` was passed. Phase H — falls back to the embedded
+/// pack library when the workspace lookup misses.
 fn load_primary_source(args: &PropertyArgs, workspace: &Path) -> Result<String> {
     match (&args.invariants, &args.pack) {
         (Some(_), Some(_)) => {
@@ -102,7 +105,17 @@ fn load_primary_source(args: &PropertyArgs, workspace: &Path) -> Result<String> 
         (None, None) => bail!("pass an invariants file or `--pack <name>`"),
         (Some(path), None) => fs::read_to_string(path)
             .with_context(|| format!("failed to read invariants file {}", path.display())),
-        (None, Some(name)) => load_pack_from_workspace(workspace, name),
+        (None, Some(name)) => {
+            let layered = LayeredLoader::new(
+                WorkspacePackLoader {
+                    workspace: workspace.to_path_buf(),
+                },
+                EmbeddedLoader,
+            );
+            layered
+                .load(name)
+                .map_err(|err| anyhow::anyhow!("rule pack `{name}` not found: {err}"))
+        }
     }
 }
 

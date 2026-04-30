@@ -52,6 +52,19 @@ invariants:
                 properties:
                   type: { type: string, enum: [text] }
                   text: { type: string, minLength: 1 }
+    test_fixtures:
+      - name: "passes with well-formed envelope"
+        response:
+          isError: true
+          content:
+            - { type: "text", text: "division by zero" }
+        expect: pass
+      - name: "fails when isError is false"
+        response:
+          isError: false
+          content:
+            - { type: "text", text: "ok" }
+        expect: fail
 
   - name: "error.unknown_tool_returns_envelope_not_panic"
     tool: "{{unknown_tool_name}}"
@@ -60,6 +73,13 @@ invariants:
       - kind: equals
         lhs: { path: "$.response.isError" }
         rhs: { value: true }
+    test_fixtures:
+      - name: "passes when isError set"
+        response: { isError: true }
+        expect: pass
+      - name: "fails when isError absent / false"
+        response: { isError: false, content: [{ type: "text", text: "ok" }] }
+        expect: fail
 
   - name: "error.text_messages_never_carry_internal_paths"
     tool: "{{error_witness_tool}}"
@@ -72,6 +92,15 @@ invariants:
           kind: matches_regex
           path: "$.response.content[0].text"
           pattern: "(?:/Users/|/home/|C:\\\\\\\\)"
+    test_fixtures:
+      - name: "passes with sanitized message"
+        response: { content: [{ type: "text", text: "division by zero" }] }
+        expect: pass
+      - name: "fails when /Users/... leaks"
+        response:
+          content:
+            - { type: "text", text: "panic at /Users/alice/server.py:42" }
+        expect: fail
 
   - name: "error.text_messages_never_carry_stack_traces"
     tool: "{{error_witness_tool}}"
@@ -84,3 +113,12 @@ invariants:
           kind: matches_regex
           path: "$.response.content[0].text"
           pattern: "Traceback \\(most recent call last\\)|^\\s*at\\s+[A-Za-z0-9_<>$.]+\\("
+    test_fixtures:
+      - name: "passes with short message"
+        response: { content: [{ type: "text", text: "division by zero" }] }
+        expect: pass
+      - name: "fails when Python traceback leaks"
+        response:
+          content:
+            - { type: "text", text: "Traceback (most recent call last):\n  File \"server.py\", line 1" }
+        expect: fail

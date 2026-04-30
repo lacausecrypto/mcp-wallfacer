@@ -31,7 +31,10 @@ pub use destructive::{DestructiveDetector, ToolClassification};
 pub use differential::{DifferentialPlan, DifferentialReport};
 pub use exec::{McpExec, MockClient};
 pub use fuzz::{FuzzOutcome, FuzzPlan, FuzzReport, SkippedTool};
-pub use pack::{resolve as resolve_pack, PackError, PackLoader};
+pub use pack::{
+    embedded_pack_names, embedded_pack_source, resolve as resolve_pack, EmbeddedLoader,
+    LayeredLoader, PackError, PackLoader, EMBEDDED_PACKS,
+};
 pub use property::{parse_invariants, PropertyPlan, PropertyReport};
 pub use reporter::{NoopReporter, Reporter, RunInfo};
 pub use torture::{parse_duration, TortureMode, TortureReport, TortureRun};
