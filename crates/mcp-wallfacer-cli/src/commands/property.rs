@@ -1,11 +1,11 @@
-use std::{fs, path::Path, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, fs, path::Path, path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use wallfacer_core::{
     client::Client,
     corpus::Corpus,
-    run::{parse_invariants, PropertyPlan, Reporter},
+    run::{resolve_pack, PackLoader, PropertyPlan, Reporter},
     target::Config,
 };
 
@@ -21,6 +21,12 @@ pub struct PropertyArgs {
     /// `wallfacer.toml` (workspace root).
     #[arg(long)]
     pub pack: Option<String>,
+    /// Override a pack template parameter. Repeatable. Format `key=value`.
+    /// Phase G: takes precedence over `[packs.<name>] key = "value"` from
+    /// `wallfacer.toml`, which itself takes precedence over the pack's
+    /// declared `default`.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    pub param: Vec<String>,
     #[arg(long)]
     pub seed: Option<u64>,
     #[arg(long, default_value_t = 100)]
@@ -38,8 +44,13 @@ pub enum OutputFormat {
 pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
     let (config_file, config) =
         Config::load_from_lookup(config_path).context("failed to load config")?;
-    let source = load_invariants_source(&args, &config_file)?;
-    let file = parse_invariants(&source)?;
+    let workspace = workspace_root(&config_file);
+
+    let primary_source = load_primary_source(&args, &workspace)?;
+    let overrides = build_overrides(&args, &config)?;
+    let loader = WorkspacePackLoader { workspace };
+    let file = resolve_pack(&primary_source, &overrides, &loader)
+        .context("failed to resolve invariants / pack chain")?;
 
     let corpus = Corpus::from_config(&config.output);
     let mut client = Client::connect(&config.target)
@@ -70,12 +81,20 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
     }
 }
 
-/// Resolves the YAML source for the run, honoring `--pack` when supplied.
-///
-/// `--pack <name>` looks under `<workspace>/packs/<name>.yaml` next to the
-/// detected `wallfacer.toml`. We prefer that location so each project can
-/// vendor its own packs without depending on a system-wide install.
-fn load_invariants_source(args: &PropertyArgs, config_file: &Path) -> Result<String> {
+/// Returns the workspace directory where `packs/` lives. Falls back to
+/// the current directory if the config file is at the repo root with no
+/// parent (rare; the lookup walks up).
+fn workspace_root(config_file: &Path) -> PathBuf {
+    config_file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Loads the primary invariants YAML source — either an explicit file
+/// from `args.invariants`, or the workspace's `packs/<name>.yaml` when
+/// `--pack <name>` was passed.
+fn load_primary_source(args: &PropertyArgs, workspace: &Path) -> Result<String> {
     match (&args.invariants, &args.pack) {
         (Some(_), Some(_)) => {
             bail!("pass either an invariants file or `--pack <name>`, not both")
@@ -83,18 +102,14 @@ fn load_invariants_source(args: &PropertyArgs, config_file: &Path) -> Result<Str
         (None, None) => bail!("pass an invariants file or `--pack <name>`"),
         (Some(path), None) => fs::read_to_string(path)
             .with_context(|| format!("failed to read invariants file {}", path.display())),
-        (None, Some(name)) => load_pack(config_file, name),
+        (None, Some(name)) => load_pack_from_workspace(workspace, name),
     }
 }
 
-fn load_pack(config_file: &Path, name: &str) -> Result<String> {
+fn load_pack_from_workspace(workspace: &Path, name: &str) -> Result<String> {
     if name.contains('/') || name.contains('\\') {
         bail!("`--pack <name>` must not contain path separators (got `{name}`)");
     }
-    let workspace = config_file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
     let candidates = [
         workspace.join("packs").join(format!("{name}.yaml")),
         workspace.join("packs").join(format!("{name}.yml")),
@@ -113,4 +128,37 @@ fn load_pack(config_file: &Path, name: &str) -> Result<String> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// Builds the parameter override map from (in increasing precedence):
+///
+/// 1. `[packs.<pack>]` table in `wallfacer.toml` (Phase G config).
+/// 2. CLI `--param key=value` (repeatable).
+fn build_overrides(args: &PropertyArgs, config: &Config) -> Result<BTreeMap<String, String>> {
+    let mut overrides = BTreeMap::new();
+    if let Some(pack_name) = &args.pack {
+        if let Some(table) = config.packs.get(pack_name) {
+            for (key, value) in table {
+                overrides.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    for raw in &args.param {
+        let (key, value) = raw
+            .split_once('=')
+            .with_context(|| format!("invalid `--param`: expected `key=value`, got `{raw}`"))?;
+        overrides.insert(key.trim().to_string(), value.to_string());
+    }
+    Ok(overrides)
+}
+
+/// `PackLoader` impl that reads `<workspace>/packs/<name>.{yaml,yml}`.
+struct WorkspacePackLoader {
+    workspace: PathBuf,
+}
+
+impl PackLoader for WorkspacePackLoader {
+    fn load(&self, name: &str) -> std::result::Result<String, String> {
+        load_pack_from_workspace(&self.workspace, name).map_err(|err| err.to_string())
+    }
 }

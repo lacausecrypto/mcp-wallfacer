@@ -15,17 +15,34 @@
 //!   same parser; v2 unlocks the new constructs above without changing how
 //!   v1 files parse.
 //!
+//! Phase G adds:
+//!
+//! * **`version: 3`** with a `metadata` block: `name`, `description`,
+//!   `authors`, `tags`, `parameters`, and `extends`.
+//! * **Mustache-style templating** — every `{{var}}` in the file is
+//!   resolved before YAML parsing using parameter defaults overridden by
+//!   the caller. References to undeclared parameters error.
+//! * **`extends`** — pack inheritance with cycle detection and a depth
+//!   cap; resolution lives in `crate::run::pack` because it requires a
+//!   loader closure.
+//!
 //! See `tests/fixtures/invariants/*.yaml` for working examples of each
 //! construct.
 
 use std::collections::BTreeMap;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 /// Highest invariant file version this build understands.
-pub const MAX_VERSION: u64 = 2;
+pub const MAX_VERSION: u64 = 3;
+
+/// Maximum depth of a chain of `metadata.extends` references. The
+/// resolver returns an error past this depth so a malformed pack ring
+/// cannot lock the loader into an unbounded walk.
+pub const MAX_EXTENDS_DEPTH: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum DslError {
@@ -39,6 +56,15 @@ pub enum DslError {
     /// File declared a `version` greater than [`MAX_VERSION`].
     #[error("invariants file declares unsupported version `{0}`; expected ≤ {MAX_VERSION}")]
     UnsupportedVersion(u64),
+    /// A `{{var}}` reference targets a parameter that the file does not
+    /// declare and the caller did not override.
+    #[error("undefined template parameter(s): {0:?}")]
+    UndefinedParameters(Vec<String>),
+    /// The caller passed an override for a parameter the pack does not
+    /// declare. We reject these to surface typos rather than silently
+    /// ignoring them.
+    #[error("override key `{0}` is not declared in metadata.parameters")]
+    UnknownParameterOverride(String),
 }
 
 pub type Result<T> = std::result::Result<T, DslError>;
@@ -46,7 +72,75 @@ pub type Result<T> = std::result::Result<T, DslError>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvariantFile {
     pub version: u64,
+    /// Pack-style metadata (name, description, parameters, extends).
+    /// Optional: a v1/v2 invariants file omits the block entirely.
+    /// (Phase G — version 3 introduces this; older versions ignore it.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<PackMetadata>,
     pub invariants: Vec<Invariant>,
+}
+
+/// `metadata` block of a v3 invariants file. Acts as the pack header
+/// when the file is loaded as a rule pack.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackMetadata {
+    /// Canonical pack name. When the file is referenced via
+    /// `wallfacer property --pack <name>`, `<name>` should match this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// One-paragraph human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Author identities (free-form strings, e.g. `"wallfacer-core"`,
+    /// `"alice@example.org"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// Tags for catalog grouping (e.g. `["security", "auth"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Declared parameters. Every `{{name}}` referenced in the file
+    /// must be declared here; the value of `default` is substituted
+    /// unless the caller passes an override via `parse_with_overrides`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, Parameter>,
+    /// Names of other packs whose invariants are imported when this
+    /// pack is loaded. Cycles are rejected; depth is capped by
+    /// [`MAX_EXTENDS_DEPTH`]. Resolution lives in
+    /// `crate::run::pack::resolve_extends`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extends: Vec<String>,
+}
+
+/// Declaration of a single template parameter inside `metadata.parameters`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parameter {
+    /// One-line operator-facing description, surfaced by
+    /// `wallfacer pack params <name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Logical type (currently informational; the substituted value is
+    /// always a string at the YAML source level).
+    #[serde(default = "default_param_kind", rename = "type")]
+    pub kind: ParamKind,
+    /// Default value used when no override is supplied. Always
+    /// stringified before substitution.
+    pub default: Value,
+}
+
+fn default_param_kind() -> ParamKind {
+    ParamKind::String
+}
+
+/// Logical type of a [`Parameter`]. Informational for now; the
+/// substituted value is always inserted as a string at the YAML source
+/// level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,10 +286,59 @@ pub enum JsonType {
     Null,
 }
 
-/// Parses an invariants YAML document.
+/// Parses an invariants YAML document with no template overrides. v3
+/// files use the `metadata.parameters` defaults verbatim; v1/v2 files
+/// pass through unchanged.
 pub fn parse(source: &str) -> Result<InvariantFile> {
-    let file: InvariantFile = serde_yaml::from_str(source)?;
-    if file.version > MAX_VERSION {
+    parse_with_overrides(source, &BTreeMap::new())
+}
+
+/// Parses an invariants YAML document, applying `{{var}}` substitution
+/// before YAML parsing.
+///
+/// Resolution order for the substituted value:
+///
+/// 1. The caller's `overrides` map (typically built from `--param` CLI
+///    flags or `[packs.<name>]` config tables).
+/// 2. The `default` field of the matching entry under
+///    `metadata.parameters`.
+///
+/// Every `{{var}}` reference must resolve to a declared parameter — a
+/// missing declaration produces [`DslError::UndefinedParameters`]. An
+/// override targeting an undeclared parameter likewise produces
+/// [`DslError::UnknownParameterOverride`] so typos surface immediately.
+pub fn parse_with_overrides(
+    source: &str,
+    overrides: &BTreeMap<String, String>,
+) -> Result<InvariantFile> {
+    // First-pass: tolerant parse to extract `metadata.parameters` (we
+    // need them before substitution so we can check the override map).
+    let raw: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let parameters = extract_parameters(&raw);
+
+    // Reject overrides that target undeclared parameters.
+    for key in overrides.keys() {
+        if !parameters.contains_key(key) {
+            return Err(DslError::UnknownParameterOverride(key.clone()));
+        }
+    }
+
+    // Build the substitution map: defaults first, overrides on top.
+    let mut subst: BTreeMap<String, String> = parameters
+        .iter()
+        .map(|(name, param)| (name.clone(), stringify_default(&param.default)))
+        .collect();
+    for (key, value) in overrides {
+        subst.insert(key.clone(), value.clone());
+    }
+
+    // Apply mustache substitution on the raw text. Any `{{var}}` that
+    // is not in `subst` is collected and reported as a single error.
+    let substituted = render_template(source, &subst)?;
+
+    // Final-pass: strict parse + structural validation.
+    let file: InvariantFile = serde_yaml::from_str(&substituted)?;
+    if file.version == 0 || file.version > MAX_VERSION {
         return Err(DslError::UnsupportedVersion(file.version));
     }
     for invariant in &file.invariants {
@@ -204,6 +347,68 @@ pub fn parse(source: &str) -> Result<InvariantFile> {
         }
     }
     Ok(file)
+}
+
+/// Walks a parsed YAML value and pulls `metadata.parameters` out as a
+/// strict typed map. Returns an empty map if the path is missing or
+/// malformed; the caller's strict pass will flag genuinely broken docs.
+fn extract_parameters(value: &serde_yaml::Value) -> BTreeMap<String, Parameter> {
+    let metadata_key = serde_yaml::Value::String("metadata".to_string());
+    let parameters_key = serde_yaml::Value::String("parameters".to_string());
+    let Some(metadata) = value.as_mapping().and_then(|m| m.get(&metadata_key)) else {
+        return BTreeMap::new();
+    };
+    let Some(parameters) = metadata.as_mapping().and_then(|m| m.get(&parameters_key)) else {
+        return BTreeMap::new();
+    };
+    serde_yaml::from_value(parameters.clone()).unwrap_or_default()
+}
+
+fn stringify_default(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Null => String::new(),
+        // Arrays and objects fall back to canonical JSON; users can use
+        // them in templates but should typically pick scalar parameters.
+        other => other.to_string(),
+    }
+}
+
+/// Substitutes every `{{name}}` (with optional surrounding whitespace)
+/// in `template` using `vars`. Identifier syntax matches Rust's loose
+/// snake-case identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_in_result,
+    reason = "static regex pattern is checked at compile-time review and cannot fail at runtime"
+)]
+fn render_template(template: &str, vars: &BTreeMap<String, String>) -> Result<String> {
+    // Compile once per call; the regex is small and patterns this short
+    // are fast enough that caching across calls is overkill.
+    let re =
+        Regex::new(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").expect("static regex must compile");
+    let mut missing: Vec<String> = Vec::new();
+    let result = re.replace_all(template, |captures: &regex::Captures<'_>| {
+        let name = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        match vars.get(name) {
+            Some(value) => value.clone(),
+            None => {
+                if !missing.iter().any(|existing| existing == name) {
+                    missing.push(name.to_string());
+                }
+                captures
+                    .get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default()
+            }
+        }
+    });
+    if !missing.is_empty() {
+        return Err(DslError::UndefinedParameters(missing));
+    }
+    Ok(result.into_owned())
 }
 
 #[cfg(test)]
@@ -374,5 +579,186 @@ invariants:
 "#;
         let err = parse(source).unwrap_err();
         assert!(matches!(err, DslError::InvalidInputMode(_)));
+    }
+
+    // ---------- Phase G — v3 metadata + templating ----------
+
+    #[test]
+    fn v3_minimal_pack_parses() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+  description: "demo pack"
+  authors: ["wallfacer-core"]
+  tags: [security]
+invariants:
+  - name: t
+    tool: echo
+    fixed: {}
+    assert:
+      - kind: equals
+        lhs: { value: 1 }
+        rhs: { value: 1 }
+"#;
+        let file = parse(source).unwrap();
+        assert_eq!(file.version, 3);
+        let meta = file.metadata.as_ref().expect("metadata");
+        assert_eq!(meta.name.as_deref(), Some("demo"));
+        assert_eq!(meta.tags, vec!["security".to_string()]);
+    }
+
+    #[test]
+    fn templating_substitutes_defaults() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+  parameters:
+    whoami_tool:
+      description: tool returning the current user
+      type: string
+      default: whoami
+invariants:
+  - name: t
+    tool: "{{whoami_tool}}"
+    fixed: {}
+    assert: []
+"#;
+        let file = parse(source).unwrap();
+        assert_eq!(file.invariants[0].tool, "whoami");
+    }
+
+    #[test]
+    fn templating_overrides_take_precedence() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+  parameters:
+    whoami_tool:
+      type: string
+      default: whoami
+invariants:
+  - name: t
+    tool: "{{whoami_tool}}"
+    fixed: {}
+    assert: []
+"#;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("whoami_tool".to_string(), "getCurrentUser".to_string());
+        let file = parse_with_overrides(source, &overrides).unwrap();
+        assert_eq!(file.invariants[0].tool, "getCurrentUser");
+    }
+
+    #[test]
+    fn templating_undeclared_reference_errors() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+invariants:
+  - name: t
+    tool: "{{whoami_tool}}"
+    fixed: {}
+    assert: []
+"#;
+        let err = parse(source).unwrap_err();
+        match err {
+            DslError::UndefinedParameters(names) => {
+                assert_eq!(names, vec!["whoami_tool".to_string()]);
+            }
+            other => panic!("expected UndefinedParameters, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn templating_unknown_override_errors() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+invariants:
+  - name: t
+    tool: echo
+    fixed: {}
+    assert: []
+"#;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("typoed".to_string(), "x".to_string());
+        let err = parse_with_overrides(source, &overrides).unwrap_err();
+        assert!(matches!(err, DslError::UnknownParameterOverride(name) if name == "typoed"));
+    }
+
+    #[test]
+    fn templating_handles_repeated_references() {
+        let source = r#"
+version: 3
+metadata:
+  name: demo
+  parameters:
+    user_tool:
+      type: string
+      default: whoami
+invariants:
+  - name: same
+    tool: "{{user_tool}}"
+    fixed: {}
+    assert:
+      - kind: equals
+        lhs: { path: "$.input" }
+        rhs: { value: "{{ user_tool }}" }
+"#;
+        let file = parse(source).unwrap();
+        assert_eq!(file.invariants[0].tool, "whoami");
+    }
+
+    #[test]
+    fn v2_packs_remain_valid_under_v3_parser() {
+        // No `metadata`, no `{{...}}`. Phase G must not break this.
+        let source = r#"
+version: 2
+invariants:
+  - name: legacy
+    tool: echo
+    fixed: { x: 1 }
+    assert:
+      - kind: equals
+        lhs: { path: "$.input.x" }
+        rhs: { value: 1 }
+"#;
+        let file = parse(source).unwrap();
+        assert_eq!(file.version, 2);
+        assert!(file.metadata.is_none());
+    }
+
+    #[test]
+    fn v3_round_trip_serde_preserves_metadata_and_invariants() {
+        let source = r#"
+version: 3
+metadata:
+  name: roundtrip
+  description: probe for serde drift
+  authors: [w]
+  tags: [t]
+  parameters:
+    a: { type: string, default: foo }
+  extends: [parent]
+invariants:
+  - name: i1
+    tool: "{{a}}"
+    fixed: {}
+    assert: []
+"#;
+        let parsed = parse(source).unwrap();
+        let yaml = serde_yaml::to_string(&parsed).unwrap();
+        let reparsed = parse(&yaml).unwrap();
+        assert_eq!(parsed.invariants.len(), reparsed.invariants.len());
+        let m1 = parsed.metadata.unwrap();
+        let m2 = reparsed.metadata.unwrap();
+        assert_eq!(m1.name, m2.name);
+        assert_eq!(m1.tags, m2.tags);
+        assert_eq!(m1.extends, m2.extends);
+        assert_eq!(m1.parameters.len(), m2.parameters.len());
     }
 }

@@ -1,34 +1,62 @@
-# Authentication / authorization rule pack.
+# Authentication & authorization rule pack.
 #
 # Loadable via: `wallfacer property --pack auth`.
-# These invariants codify common authentication contracts an MCP server
-# should respect. They are deliberately conservative: tools you don't have
-# can be commented out without invalidating the pack.
-version: 2
+# Phase G — v3 with parameters: every tool name is overridable so the
+# pack works against any naming convention. Override either via CLI:
+#
+#   wallfacer property --pack auth --param whoami_tool=getCurrentUser
+#
+# or via `wallfacer.toml`:
+#
+#   [packs.auth]
+#   whoami_tool = "getCurrentUser"
+version: 3
+metadata:
+  name: auth
+  description: "Runtime checks for authentication and authorization contracts."
+  authors: ["wallfacer-core"]
+  tags: [security, auth]
+  parameters:
+    whoami_tool:
+      description: "Tool that returns the current user identity."
+      type: string
+      default: "whoami"
+    list_resources_tool:
+      description: "Tool that lists resources the current user can access."
+      type: string
+      default: "list_resources"
+    get_user_tool:
+      description: "Tool that fetches a user record by id."
+      type: string
+      default: "get_user"
+    bearer_witness_tool:
+      description: "A read-only tool used as a witness for bearer-echo testing. Pick one that does NOT legitimately echo input back."
+      type: string
+      default: "echo"
+    admin_path_pattern:
+      description: "Regex matching URIs that should never appear in a non-admin user's resource list."
+      type: string
+      default: "(?i)/admin(/|$)"
+
 invariants:
   - name: "auth.unauthenticated_requests_are_rejected"
-    tool: whoami
+    tool: "{{whoami_tool}}"
     fixed: {}
     assert:
       - kind: any_of
         assert:
-          # Either the server returns isError=true (preferred)
           - kind: equals
             lhs: { path: "$.response.isError" }
             rhs: { value: true }
-          # Or the structured response carries an explicit "anonymous" flag.
           - kind: equals
             lhs: { path: "$.response.structuredContent.anonymous" }
             rhs: { value: true }
 
   - name: "auth.bearer_tokens_never_echoed"
-    tool: echo
+    tool: "{{bearer_witness_tool}}"
     fixed:
       text: "Authorization: Bearer abc123"
     assert:
-      # The server must NOT echo the bearer back in plaintext. If your
-      # echo tool is a literal echoer, scope this invariant to a more
-      # secret-aware tool instead.
       - kind: not
         assertion:
           kind: matches_regex
@@ -36,7 +64,7 @@ invariants:
           pattern: "Bearer\\s+[A-Za-z0-9\\.-_]+"
 
   - name: "auth.role_based_listing_filters_admin_resources"
-    tool: list_resources
+    tool: "{{list_resources_tool}}"
     fixed:
       role: "user"
     assert:
@@ -47,10 +75,10 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.item.uri"
-              pattern: "(?i)/admin(/|$)"
+              pattern: "{{admin_path_pattern}}"
 
   - name: "auth.session_cookies_are_never_returned_in_payloads"
-    tool: get_user
+    tool: "{{get_user_tool}}"
     fixed:
       id: "1"
     assert:

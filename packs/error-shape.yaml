@@ -5,10 +5,33 @@
 # matters for clients that branch on `isError` rather than attempting to
 # parse free-form prose.
 # Loadable via: `wallfacer property --pack error-shape`.
-version: 2
+#
+# Phase G — v3 with parameters: pick the witness tool that should
+# fail (e.g. divide by zero) and the tool name that doesn't exist on
+# your server.
+#
+#   [packs.error-shape]
+#   error_witness_tool = "divide"
+#   error_witness_input = { a = 1, b = 0 }
+version: 3
+metadata:
+  name: error-shape
+  description: "Verifies the shape of error envelopes returned by tool calls."
+  authors: ["wallfacer-core"]
+  tags: [reliability, errors]
+  parameters:
+    error_witness_tool:
+      description: "A tool that the witness payload reliably forces into the error path."
+      type: string
+      default: "divide"
+    unknown_tool_name:
+      description: "A tool name that does NOT exist on the server."
+      type: string
+      default: "this_tool_does_not_exist"
+
 invariants:
-  - name: "error.divide_by_zero_envelope"
-    tool: divide
+  - name: "error.witness_returns_well_formed_envelope"
+    tool: "{{error_witness_tool}}"
     fixed:
       a: 1
       b: 0
@@ -31,7 +54,7 @@ invariants:
                   text: { type: string, minLength: 1 }
 
   - name: "error.unknown_tool_returns_envelope_not_panic"
-    tool: this_tool_does_not_exist
+    tool: "{{unknown_tool_name}}"
     fixed: {}
     assert:
       - kind: equals
@@ -39,7 +62,7 @@ invariants:
         rhs: { value: true }
 
   - name: "error.text_messages_never_carry_internal_paths"
-    tool: divide
+    tool: "{{error_witness_tool}}"
     fixed:
       a: 1
       b: 0
@@ -51,7 +74,7 @@ invariants:
           pattern: "(?:/Users/|/home/|C:\\\\\\\\)"
 
   - name: "error.text_messages_never_carry_stack_traces"
-    tool: divide
+    tool: "{{error_witness_tool}}"
     fixed:
       a: 1
       b: 0

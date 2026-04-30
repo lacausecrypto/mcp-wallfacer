@@ -58,6 +58,14 @@ pub struct Config {
     pub allow_destructive: AllowDestructiveConfig,
     #[serde(default)]
     pub destructive: DestructiveConfig,
+    /// Per-pack template parameter overrides (Phase G).
+    ///
+    /// `[packs.<pack_name>] key = "value"` populates the resolution
+    /// context that `parse_with_overrides` consumes when loading the
+    /// pack named `<pack_name>`. CLI `--param` flags layer on top of
+    /// these.
+    #[serde(default)]
+    pub packs: HashMap<String, HashMap<String, String>>,
 }
 
 /// `[destructive]` section of `wallfacer.toml`. Empty by default; populating

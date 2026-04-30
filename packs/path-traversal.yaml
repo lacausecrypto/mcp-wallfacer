@@ -3,15 +3,39 @@
 # Probes file-handling tools with classic traversal payloads and asserts
 # the response cannot contain content from outside the intended root.
 # Loadable via: `wallfacer property --pack path-traversal`.
-version: 2
+#
+# Phase G — v3 with parameters: override the read/write tool names if
+# yours don't match the defaults.
+#
+#   [packs.path-traversal]
+#   read_file_tool = "fs_read"
+#   write_file_tool = "fs_write"
+version: 3
+metadata:
+  name: path-traversal
+  description: "Probes filesystem-bridging tools for path-traversal escapes."
+  authors: ["wallfacer-core"]
+  tags: [security, filesystem]
+  parameters:
+    read_file_tool:
+      description: "Tool that reads a file by path."
+      type: string
+      default: "read_file"
+    write_file_tool:
+      description: "Tool that writes a file by path."
+      type: string
+      default: "write_file"
+    sensitive_unix_pattern:
+      description: "Regex of `/etc/passwd`-style content that must never leak."
+      type: string
+      default: "(?i)root:.*:/bin/(ba)?sh"
+
 invariants:
   - name: "path.dotdot_segments_rejected_by_read_file"
-    tool: read_file
+    tool: "{{read_file_tool}}"
     fixed:
       path: "../../../etc/passwd"
     assert:
-      # Either the server flagged the request, or no /etc-style content
-      # leaked back. Both are acceptable defences.
       - kind: any_of
         assert:
           - kind: equals
@@ -21,10 +45,10 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.response.content[0].text"
-              pattern: "(?i)root:.*:/bin/(ba)?sh"
+              pattern: "{{sensitive_unix_pattern}}"
 
   - name: "path.absolute_paths_outside_root_rejected"
-    tool: read_file
+    tool: "{{read_file_tool}}"
     fixed:
       path: "/etc/shadow"
     assert:
@@ -40,7 +64,7 @@ invariants:
               pattern: "(?i)root:|nobody:"
 
   - name: "path.windows_unc_rejected"
-    tool: read_file
+    tool: "{{read_file_tool}}"
     fixed:
       path: "\\\\evilhost\\share\\hosts"
     assert:
@@ -49,7 +73,7 @@ invariants:
         rhs: { value: true }
 
   - name: "path.symlink_escape_rejected_by_write_file"
-    tool: write_file
+    tool: "{{write_file_tool}}"
     fixed:
       path: "../escaped.txt"
       contents: "<wallfacer-secret>"
@@ -59,7 +83,7 @@ invariants:
         rhs: { value: true }
 
   - name: "path.url_encoded_traversal_normalised_or_rejected"
-    tool: read_file
+    tool: "{{read_file_tool}}"
     fixed:
       path: "..%2F..%2F..%2Fetc%2Fpasswd"
     assert:
@@ -72,4 +96,4 @@ invariants:
             assertion:
               kind: matches_regex
               path: "$.response.content[0].text"
-              pattern: "(?i)root:.*:/bin/(ba)?sh"
+              pattern: "{{sensitive_unix_pattern}}"
