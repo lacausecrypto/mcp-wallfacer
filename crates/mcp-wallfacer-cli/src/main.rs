@@ -26,6 +26,7 @@ enum Command {
     Property(commands::property::PropertyArgs),
     Torture(commands::torture::TortureArgs),
     Corpus(commands::corpus::CorpusArgs),
+    Ci(commands::ci::CiArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
         Some(Command::Property(args)) => commands::property::run(args, cli.config.as_deref()).await,
         Some(Command::Torture(args)) => commands::torture::run(args, cli.config.as_deref()).await,
         Some(Command::Corpus(args)) => commands::corpus::run(args, cli.config.as_deref()).await,
+        Some(Command::Ci(args)) => commands::ci::run(args, cli.config.as_deref()).await,
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())

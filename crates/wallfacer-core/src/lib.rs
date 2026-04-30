@@ -4,6 +4,7 @@ pub mod differential;
 pub mod finding;
 pub mod mutate;
 pub mod property;
+pub mod sarif;
 pub mod seed;
 pub mod target;
 

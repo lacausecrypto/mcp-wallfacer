@@ -1,3 +1,4 @@
+pub mod ci;
 pub mod corpus;
 pub mod differential;
 pub mod doctor;
