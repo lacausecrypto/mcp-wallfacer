@@ -155,7 +155,7 @@ impl FuzzCorpus {
                 }
             }
         }
-        out.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        out.sort_by_key(|e| e.timestamp);
         Ok(out)
     }
 
