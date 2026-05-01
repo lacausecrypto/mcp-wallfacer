@@ -77,6 +77,7 @@ pub async fn run(args: FuzzArgs, config_path: Option<&Path>) -> Result<()> {
         transport_name: config.target.transport_name().to_string(),
         detector: DestructiveDetector::from_config(&config.destructive, &config.allow_destructive)
             .context("invalid destructive / allowlist regex in config")?,
+        severity: config.severity.clone(),
     };
 
     if args.dry_run {

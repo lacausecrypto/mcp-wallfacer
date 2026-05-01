@@ -4,6 +4,80 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.3.2 — 2026-05-01
+
+Patch focused on correctness and footgun-removal in the run plans and
+the persistence layer. No surface API breakage; the wallfacer CLI keeps
+the same flags and config schema.
+
+### Fixed (correctness / security)
+
+* **Server-echoed secrets no longer leak into the corpus.**
+  `Finding::message` and `Finding::details` carry raw text from the MCP
+  target — including error messages that may echo back the
+  `Authorization` header or a key/value the tool was called with. Both
+  fields now run through a new `redact_string()` regex pass that masks
+  `Bearer <token>` / `Basic <token>` and `<sensitive-key>=<value>` /
+  `<sensitive-key>: <value>` patterns. Defence-in-depth on top of the
+  existing JSON-key redactor.
+* **Filesystem-safe tool names in the corpus.** Tool names come from
+  the server we are fuzzing; a malicious one declaring a name like
+  `../../etc/passwd` could previously have steered the corpus writer
+  outside `corpus_dir`. New `sanitize_tool_name()` helper replaces any
+  character outside `[A-Za-z0-9_-]` with `_`.
+* **`at_most` / `at_least` integer comparisons past 2^53.** The runner
+  routed both operands through `f64`, so values above the f64 mantissa
+  boundary (e.g. `9_007_199_254_740_993`) silently rounded to their
+  neighbour and produced wrong-but-passing assertions. Comparisons now
+  fast-path through `i128` for any pair of JSON integers.
+* **Destructive guard in `torture` and `differential`.** Both run plans
+  used to call out to target tools without checking the configured
+  `[destructive]` / `[allow_destructive]` rules — only `fuzz` honoured
+  them. They now refuse to invoke a destructive tool that isn't
+  allowlisted, matching the existing `fuzz` behaviour.
+* **`[destructive].patterns` is additive by default.** Setting one
+  custom pattern previously suppressed the built-in keywords entirely
+  (`delete`, `drop`, `destroy`, ...) — surprising, easy to miss, and
+  exactly the wrong direction for a safety knob. Built-ins now stay
+  active alongside user patterns; opt out explicitly with
+  `replace_defaults = true`.
+* **`ci --max-duration` actually enforces the timeout.** The flag
+  parsed but was never wired through; long-running diff runs could
+  blow past the budget. Now wrapped in `tokio::time::timeout` with a
+  clean shutdown + exit `2` on overrun.
+* **`compact_json` no longer panics on multi-byte chars.** The 120-byte
+  truncation used to slice mid-codepoint when server output contained
+  emoji or wide-form unicode; now snaps back to the nearest UTF-8 char
+  boundary.
+
+### Added
+
+* **`${VAR}` expansion in `wallfacer.toml`.** The HTTP template already
+  documented `Authorization = "Bearer ${WALLFACER_BEARER}"`, but the
+  loader never substituted: secrets had to be hard-coded or piped
+  through a separate templating step. Placeholders now resolve against
+  the process env at load time. Use `$$` to keep a literal `$`; bare
+  `$` is passed through unchanged for backward compatibility with
+  shell-style command lines.
+* **`[severity]` overrides applied across all run plans.** The
+  config block existed but only `fuzz` honoured it; `differential`,
+  `property`, `torture`, and `ci` now layer the override on every
+  finding before persistence. New helpers: `FindingKind::keyword()`
+  and `Finding::with_severity()`.
+* **Empty `for_each` set surfaces a warning.** A typo'd JSONPath used
+  to silently make an invariant vacuously true — the runner now logs a
+  `tracing::warn!` so authors running with `-v` see the gap. Behaviour
+  is unchanged when the empty set is intentional.
+* **`corpus replay` honours `WALLFACER_REPLAY_<KEY>` env vars.** Reused
+  the same unredaction step as `wallfacer replay <id>` so a `<redacted>`
+  payload doesn't get sent verbatim to the server. Implementation
+  shared via the new `commands/unredact` module; the standalone replay
+  test moved with it.
+* **`corpus minimize` prints a clear "inspect-only" note.** Automatic
+  input shrinking is on the v0.4 roadmap; in the meantime the command
+  no longer pretends to minimise — it states the limitation and prints
+  the finding so authors can hand-shrink.
+
 ## v0.3.1 — 2026-05-01
 
 Patch release fixing two release-pipeline bugs that surfaced while

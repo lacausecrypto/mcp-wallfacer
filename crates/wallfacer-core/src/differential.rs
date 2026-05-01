@@ -7,6 +7,8 @@ use std::{
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
+use crate::corpus::sanitize_tool_name;
+
 #[derive(Debug, Error)]
 pub enum DifferentialError {
     #[error("failed to create schema directory {path}: {source}")]
@@ -246,17 +248,4 @@ fn type_name(value: &Value) -> String {
         Value::Object(_) => "object",
     }
     .to_string()
-}
-
-fn sanitize_tool_name(tool_name: &str) -> String {
-    tool_name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }

@@ -9,3 +9,4 @@ pub mod pack;
 pub mod property;
 pub mod replay;
 pub mod torture;
+pub mod unredact;

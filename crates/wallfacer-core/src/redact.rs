@@ -6,6 +6,9 @@
 //! filtered through [`Redact::redacted`] so cleartext secrets do not leak into
 //! corpus files, SARIF output, or shared logs.
 
+use std::sync::OnceLock;
+
+use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::{
@@ -74,6 +77,59 @@ fn contains_secret_marker(lower: &str) -> bool {
         "private_key",
     ];
     MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Returns a copy of `text` with secret-like substrings replaced by
+/// [`REDACTED_PLACEHOLDER`]. Patterns matched (case-insensitive):
+///
+/// * `Authorization: Bearer <token>` / `Bearer <token>` (also `Basic`).
+/// * `<sensitive-key> = <value>` and `<sensitive-key>: <value>` where
+///   `<sensitive-key>` matches the same keyword set as
+///   [`is_sensitive_key`].
+///
+/// The harness writes server output verbatim into `Finding::details` when
+/// a schema violation triggers, so secrets that show up in error
+/// messages or echoed payloads would otherwise leak into the corpus.
+/// This is a defence-in-depth pass on top of [`redact_json`]; the docs
+/// (`docs/security.md`) still describe redaction as best-effort and
+/// pattern-based.
+pub fn redact_string(text: &str) -> String {
+    let mut out = text.to_string();
+    for pattern in string_patterns() {
+        out = pattern
+            .replace_all(&out, |caps: &regex::Captures<'_>| {
+                // Capture group 1 holds the prefix to keep, group 2 (if
+                // present) the secret to mask. When only one group exists
+                // the entire match is masked.
+                if let Some(prefix) = caps.get(1) {
+                    if caps.get(2).is_some() {
+                        return format!("{}{REDACTED_PLACEHOLDER}", prefix.as_str());
+                    }
+                }
+                REDACTED_PLACEHOLDER.to_string()
+            })
+            .into_owned();
+    }
+    out
+}
+
+fn string_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        // Each pattern's first capture group is the literal prefix kept
+        // verbatim; the second (where present) is the secret value that
+        // gets replaced.
+        let raw: &[&str] = &[
+            // `Bearer <tok>` / `Basic <tok>` (with optional `Authorization:`).
+            r"(?i)((?:authorization\s*:\s*)?(?:bearer|basic)\s+)([A-Za-z0-9._\-+/=]{6,})",
+            // `key=value` / `key:value` / `"key":"value"` for known sensitive keys.
+            // Stops at whitespace or common delimiters so surrounding text is preserved.
+            r#"(?i)((?:^|[\s,;{(\["'])(?:authorization|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|secret|client[-_]?secret|password|passwd|bearer|private[-_]?key|token)["']?\s*[:=]\s*["']?)([^"',;\s\)\]\}]{4,})"#,
+        ];
+        raw.iter()
+            .filter_map(|src| Regex::new(src).ok())
+            .collect()
+    })
 }
 
 /// Recursively redacts a JSON value: any object entry whose key matches
@@ -161,8 +217,13 @@ impl Redact for Finding {
             kind: self.kind.clone(),
             severity: self.severity,
             tool: self.tool.clone(),
-            message: self.message.clone(),
-            details: self.details.clone(),
+            // `message` and `details` carry server-supplied text (error
+            // strings, echoed payload fragments). Run them through the
+            // string-level redactor so a tool that echoes credentials
+            // back doesn't leak them into corpus files. Best-effort:
+            // see `docs/security.md`.
+            message: redact_string(&self.message),
+            details: redact_string(&self.details),
             repro: self.repro.redacted(),
             timestamp: self.timestamp,
         }
@@ -331,6 +392,61 @@ mod tests {
             Some(REDACTED_PLACEHOLDER)
         );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn redact_string_masks_bearer_tokens() {
+        let input = "got Authorization: Bearer abcDEF123456 from server";
+        let output = redact_string(input);
+        assert!(
+            output.contains(REDACTED_PLACEHOLDER),
+            "expected redaction in {output:?}"
+        );
+        assert!(!output.contains("abcDEF123456"));
+    }
+
+    #[test]
+    fn redact_string_masks_kv_secrets() {
+        let cases = [
+            "error: api_key=sk-abcdef12345 not found",
+            "params: password: hunter22 expired",
+            r#"{"access_token": "tok-1234"}"#,
+        ];
+        for input in cases {
+            let output = redact_string(input);
+            assert!(
+                output.contains(REDACTED_PLACEHOLDER),
+                "expected redaction in {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_string_passes_through_benign_text() {
+        let benign = "tool returned 5 items in 12ms";
+        assert_eq!(redact_string(benign), benign);
+    }
+
+    #[test]
+    fn redact_finding_masks_message_and_details() {
+        use crate::finding::{Finding, FindingKind};
+        let finding = Finding::new(
+            FindingKind::SchemaViolation,
+            "tool",
+            "auth failed: api_key=sk-leaked-abc123",
+            "server response: Authorization: Bearer leak-token-xyz",
+            ReproInfo {
+                seed: 1,
+                tool_call: json!({}),
+                transport: "stdio".to_string(),
+                composition_trail: Vec::new(),
+            },
+        );
+        let redacted = finding.redacted();
+        assert!(redacted.message.contains(REDACTED_PLACEHOLDER));
+        assert!(!redacted.message.contains("sk-leaked-abc123"));
+        assert!(redacted.details.contains(REDACTED_PLACEHOLDER));
+        assert!(!redacted.details.contains("leak-token-xyz"));
     }
 
     #[test]

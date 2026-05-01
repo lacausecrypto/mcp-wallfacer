@@ -15,6 +15,7 @@ use crate::{
     finding::{Finding, FindingKind, ReproInfo},
     mutate::{try_generate_payload, GenMode},
     seed::{derive_seed, derive_seed_canonical},
+    target::SeverityConfig,
 };
 
 use super::{
@@ -89,6 +90,9 @@ pub struct FuzzPlan {
     /// Compiled destructive-tool detector built from
     /// `[destructive]` + `[allow_destructive]` config.
     pub detector: DestructiveDetector,
+    /// `[severity]` overrides from `wallfacer.toml`. Applied to every
+    /// produced finding before it lands on disk.
+    pub severity: SeverityConfig,
 }
 
 impl FuzzPlan {
@@ -177,7 +181,7 @@ impl FuzzPlan {
                 };
 
                 if let Some((kind, message, details)) = kind_message_details {
-                    let finding = Finding::new(
+                    let mut finding = Finding::new(
                         kind,
                         &tool_name,
                         message,
@@ -189,6 +193,9 @@ impl FuzzPlan {
                             composition_trail: payload.trail,
                         },
                     );
+                    if let Some(override_sev) = self.severity.resolve(finding.kind.keyword()) {
+                        finding = finding.with_severity(override_sev);
+                    }
                     corpus
                         .write_finding(&finding)
                         .with_context(|| format!("failed to persist finding for `{tool_name}`"))?;
@@ -273,6 +280,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             transport_name: "mock".to_string(),
             detector,
+            severity: SeverityConfig::default(),
         }
     }
 

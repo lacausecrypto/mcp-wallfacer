@@ -6,7 +6,7 @@ use wallfacer_core::{
     client::Client,
     corpus::Corpus,
     differential::inferred_schema_dir,
-    run::{DifferentialPlan, Reporter},
+    run::{DestructiveDetector, DifferentialPlan, Reporter},
     target::Config,
 };
 
@@ -44,6 +44,9 @@ pub async fn run(args: DifferentialArgs, config_path: Option<&Path>) -> Result<(
         schema_dir: inferred_schema_dir(),
         timeout: Duration::from_millis(config.target.timeout_ms),
         transport_name: config.target.transport_name().to_string(),
+        detector: DestructiveDetector::from_config(&config.destructive, &config.allow_destructive)
+            .context("invalid destructive / allowlist regex in config")?,
+        severity: config.severity.clone(),
     };
 
     if plan.learn {

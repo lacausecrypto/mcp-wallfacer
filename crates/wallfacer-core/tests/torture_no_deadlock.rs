@@ -28,7 +28,8 @@ use serde_json::Map;
 use wallfacer_core::{
     client::CallOutcome,
     corpus::Corpus,
-    run::{MockClient, NoopReporter, TortureMode, TortureRun},
+    run::{DestructiveDetector, MockClient, NoopReporter, TortureMode, TortureRun},
+    target::{AllowDestructiveConfig, DestructiveConfig},
 };
 
 fn empty_object_tool(name: &str) -> Tool {
@@ -108,6 +109,11 @@ async fn torture_completes_under_60s_with_four_crash_prone_tools() {
     let started = Instant::now();
     let mut total_findings = 0usize;
     for tool_name in ["always_crashes", "hangs_forever", "flap", "ok"] {
+        let detector = DestructiveDetector::from_config(
+            &DestructiveConfig::default(),
+            &AllowDestructiveConfig::default(),
+        )
+        .unwrap();
         let mut run = TortureRun::new(
             TortureMode::Parallel,
             tool_name.to_string(),
@@ -117,6 +123,7 @@ async fn torture_completes_under_60s_with_four_crash_prone_tools() {
             // deadline (4 × per-call = 4 s).
             Duration::from_secs(1),
             "mock".to_string(),
+            detector,
         );
         // Override global_deadline explicitly so the test stays fast.
         run.global_deadline = Duration::from_secs(3);

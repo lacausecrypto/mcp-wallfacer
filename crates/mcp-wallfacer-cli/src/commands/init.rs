@@ -117,9 +117,12 @@ corpus_dir = ".wallfacer/corpus"
 # [allow_destructive]
 # tools = ["^logs_.*$"]
 
-# Phase C: replace the default destructive keyword set with custom regexes.
+# Phase C: extend the default destructive keyword set with custom regexes.
+# Patterns are *additive* by default; set `replace_defaults = true` to
+# turn off the built-ins (delete/drop/destroy/...).
 # [destructive]
 # patterns = ["^remove_.*$", "^drop_.*$"]
+# replace_defaults = false
 
 # {note}
 "#
@@ -134,9 +137,11 @@ url = "http://localhost:8000/mcp"
 timeout_ms = 5000
 
 [target.headers]
-# Authentication is loaded from the env so secrets don't sit in the
-# config: leave the file checked into the repo and export the actual
-# bearer locally.
+# `${VAR}` placeholders are expanded against the environment when this
+# file is loaded (use `$$` to keep a literal `$`). Export the bearer
+# locally so secrets don't sit in the repo:
+#
+#     export WALLFACER_BEARER=...
 Authorization = "Bearer ${WALLFACER_BEARER}"
 
 [output]
@@ -148,6 +153,7 @@ corpus_dir = ".wallfacer/corpus"
 
 # [destructive]
 # patterns = ["^remove_.*$"]
+# replace_defaults = false
 "#;
 
 fn detect_target(cwd: &Path) -> (&'static str, String, &'static str) {

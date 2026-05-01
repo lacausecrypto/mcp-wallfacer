@@ -95,6 +95,11 @@ const DEFAULT_KEYWORDS: &[&str] = &[
 impl DestructiveDetector {
     /// Compiles a detector from configuration. Returns an error if any
     /// pattern fails to parse.
+    ///
+    /// Default keywords (`delete`, `drop`, ...) stay active unless the
+    /// operator opts out via `[destructive] replace_defaults = true`.
+    /// Older configs that simply added `patterns` used to silently lose
+    /// the built-in protection — that footgun is gone.
     pub fn from_config(
         destructive: &DestructiveConfig,
         allow: &AllowDestructiveConfig,
@@ -104,7 +109,7 @@ impl DestructiveDetector {
         Ok(Self {
             destructive_patterns,
             allow_patterns,
-            use_default_keywords: destructive.patterns.is_empty(),
+            use_default_keywords: !destructive.replace_defaults,
         })
     }
 
@@ -267,20 +272,42 @@ mod tests {
     }
 
     #[test]
-    fn custom_destructive_patterns_replace_default_keywords() {
+    fn custom_patterns_layer_on_top_of_default_keywords() {
         let destructive = DestructiveConfig {
             patterns: vec!["^remove_.*$".to_string()],
+            replace_defaults: false,
         };
         let detector =
             DestructiveDetector::from_config(&destructive, &AllowDestructiveConfig::default())
                 .unwrap();
-        // `delete_user` would match the default keywords but custom patterns
-        // are configured, which suppresses the default list.
-        let benign = tool("delete_user", None, None);
-        assert_eq!(detector.classify(&benign), ToolClassification::Allowed);
-        let evil = tool("remove_record", None, None);
+        // Both the default keyword (`delete_user`) and the custom
+        // pattern (`remove_*`) flag a tool as destructive: additive.
+        let by_default_keyword = tool("delete_user", None, None);
         assert!(matches!(
-            detector.classify(&evil),
+            detector.classify(&by_default_keyword),
+            ToolClassification::Destructive { .. }
+        ));
+        let by_custom_pattern = tool("remove_record", None, None);
+        assert!(matches!(
+            detector.classify(&by_custom_pattern),
+            ToolClassification::Destructive { .. }
+        ));
+    }
+
+    #[test]
+    fn replace_defaults_disables_built_in_keywords() {
+        let destructive = DestructiveConfig {
+            patterns: vec!["^remove_.*$".to_string()],
+            replace_defaults: true,
+        };
+        let detector =
+            DestructiveDetector::from_config(&destructive, &AllowDestructiveConfig::default())
+                .unwrap();
+        let now_benign = tool("delete_user", None, None);
+        assert_eq!(detector.classify(&now_benign), ToolClassification::Allowed);
+        let still_destructive = tool("remove_record", None, None);
+        assert!(matches!(
+            detector.classify(&still_destructive),
             ToolClassification::Destructive { .. }
         ));
     }

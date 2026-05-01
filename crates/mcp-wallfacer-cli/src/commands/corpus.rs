@@ -8,8 +8,11 @@ use wallfacer_core::{
     client::{CallOutcome, Client},
     corpus::Corpus,
     finding::{Finding, FindingKind},
+    redact::REDACTED_PLACEHOLDER,
     target::{default_corpus_dir, Config},
 };
+
+use crate::commands::unredact::unredact;
 
 #[derive(Debug, Args)]
 pub struct CorpusArgs {
@@ -113,12 +116,22 @@ async fn replay(
 }
 
 async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> String {
+    // The persisted payload carries `<redacted>` placeholders; substitute
+    // them from `WALLFACER_REPLAY_<KEY_UPPER>` so the server sees the
+    // real values rather than the literal placeholder. Identical
+    // behaviour to `wallfacer replay <id>`.
+    let (payload, missing) = unredact(&finding.repro.tool_call);
+    if !missing.is_empty() {
+        eprintln!(
+            "note: corpus replay payload still contains `{REDACTED_PLACEHOLDER}` for keys \
+             without a matching env var: {missing:?}"
+        );
+        eprintln!(
+            "      set WALLFACER_REPLAY_<KEY_UPPER> for each one to restore the original value."
+        );
+    }
     let outcome = client
-        .call_tool(
-            &finding.tool,
-            finding.repro.tool_call.clone(),
-            Duration::from_millis(timeout_ms),
-        )
+        .call_tool(&finding.tool, payload, Duration::from_millis(timeout_ms))
         .await;
 
     match (&finding.kind, outcome) {
@@ -138,16 +151,30 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
 }
 
 fn minimize(corpus: &Corpus, id: &str) -> Result<()> {
+    // True input-shrinking is on the v0.4 roadmap. Until then, the
+    // command is a passive inspect-only operation that prints the
+    // finding so authors can hand-minimise. Surface a clear note rather
+    // than letting users assume an automatic shrink happened.
     let finding = corpus.find_by_id(id)?;
+    eprintln!(
+        "note: `corpus minimize` is currently inspect-only. Automatic input shrinking is \
+         tracked for v0.4. Printing the finding verbatim below so you can shrink manually."
+    );
     println!("{}", serde_json::to_string_pretty(&finding)?);
     Ok(())
 }
 
 fn compact_json(value: &Value) -> String {
     let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    if text.len() > 120 {
-        format!("{}...", &text[..120])
-    } else {
-        text
+    if text.len() <= 120 {
+        return text;
     }
+    // Slice on a UTF-8 char boundary so multi-byte codepoints (escape
+    // sequences from server output, emoji in error messages, ...) don't
+    // panic the formatter mid-character.
+    let mut cut = 120;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &text[..cut])
 }

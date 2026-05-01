@@ -84,6 +84,30 @@ impl FindingKind {
             FindingKind::StateLeak => Severity::High,
         }
     }
+
+    /// Stable keyword used as a config key in `[severity]` overrides.
+    /// Lower-case snake_case form matching the kind tag.
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            FindingKind::Crash => "crash",
+            FindingKind::Hang { .. } => "hang",
+            FindingKind::ProtocolError => "protocol_error",
+            FindingKind::SchemaViolation => "schema_violation",
+            FindingKind::PropertyFailure { .. } => "property_failure",
+            FindingKind::StateLeak => "state_leak",
+        }
+    }
+}
+
+impl Finding {
+    /// Returns a copy of this finding with `severity` replaced. Used by
+    /// the run plans to layer `[severity]` config overrides on top of
+    /// the per-kind defaults.
+    #[must_use]
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
+    }
 }
 
 pub fn finding_id(tool: &str, kind: &FindingKind, tool_call: &Value) -> String {

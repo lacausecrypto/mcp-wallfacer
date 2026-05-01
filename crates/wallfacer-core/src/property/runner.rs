@@ -17,6 +17,7 @@ use rand::RngCore;
 use regex::Regex;
 use serde_json::{json, Map, Number, Value};
 use thiserror::Error;
+use tracing::warn;
 
 use super::{
     dsl::{
@@ -170,8 +171,12 @@ fn evaluate_assertion(assertion: &Assertion, context: &Value) -> Result<()> {
                 )))
             }
         }
-        Assertion::AtMost { path, value } => compare_number(path, value, context, |a, b| a <= b),
-        Assertion::AtLeast { path, value } => compare_number(path, value, context, |a, b| a >= b),
+        Assertion::AtMost { path, value } => compare_number(path, value, context, |o| {
+            matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        }),
+        Assertion::AtLeast { path, value } => compare_number(path, value, context, |o| {
+            matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        }),
         Assertion::LengthEq { path, value } => compare_length(path, value, context, |a, b| a == b),
         Assertion::LengthAtMost { path, value } => {
             compare_length(path, value, context, |a, b| a <= b)
@@ -286,9 +291,15 @@ fn evaluate_any_of(assertions: &[Assertion], context: &Value) -> Result<()> {
 fn evaluate_for_each(path: &str, assertions: &[Assertion], context: &Value) -> Result<()> {
     let nodes = jsonpath::resolve(context, path)?;
     if nodes.is_empty() {
-        // `for_each` over an empty set is vacuously true. We still surface a
-        // helpful warning for invariant authors that probably did not mean
-        // to write a no-op.
+        // `for_each` over an empty set is vacuously true. Emit a warning
+        // so an author who typo'd a path (e.g. `$.respnse.items[*]`)
+        // doesn't ship an invariant that silently always passes. Run
+        // `wallfacer property -v` to see this.
+        warn!(
+            jsonpath = path,
+            "for_each path matched zero nodes; the assertion is vacuously true. \
+             Double-check the path or wrap intentional empty-set cases in `any_of` / `not`."
+        );
         return Ok(());
     }
     for (index, node) in nodes.into_iter().enumerate() {
@@ -320,26 +331,55 @@ fn compare_number(
     path: &str,
     value: &Operand,
     context: &Value,
-    compare: impl FnOnce(f64, f64) -> bool,
+    compare: impl Fn(std::cmp::Ordering) -> bool,
 ) -> Result<()> {
     let left = jsonpath::resolve_one(context, path)?;
     let right = value.resolve(context)?;
-    let Some(left) = left.as_f64() else {
+
+    // Fast path: when both operands fit in `i128` (covers any JSON
+    // integer, signed or unsigned), compare without going through f64.
+    // f64 only has 53 bits of mantissa, so values like
+    // `9_007_199_254_740_993` lose precision and equal their
+    // `…992` neighbour — silently corrupting `at_most`/`at_least`.
+    if let (Some(l), Some(r)) = (as_i128(&left), as_i128(&right)) {
+        if compare(l.cmp(&r)) {
+            return Ok(());
+        }
+        return Err(RunnerError::Assertion(format!(
+            "numeric comparison failed: {l} vs {r}"
+        )));
+    }
+
+    let Some(left_f) = left.as_f64() else {
         return Err(RunnerError::Assertion(format!(
             "expected {path} to resolve to a number"
         )));
     };
-    let Some(right) = right.as_f64() else {
+    let Some(right_f) = right.as_f64() else {
         return Err(RunnerError::Assertion(
             "expected comparison value to be a number".to_string(),
         ));
     };
-    if compare(left, right) {
+    let ordering = left_f
+        .partial_cmp(&right_f)
+        .ok_or_else(|| RunnerError::Assertion("comparison against NaN".to_string()))?;
+    if compare(ordering) {
         Ok(())
     } else {
         Err(RunnerError::Assertion(format!(
-            "numeric comparison failed: {left} vs {right}"
+            "numeric comparison failed: {left_f} vs {right_f}"
         )))
+    }
+}
+
+fn as_i128(value: &Value) -> Option<i128> {
+    let Value::Number(n) = value else {
+        return None;
+    };
+    if let Some(i) = n.as_i64() {
+        Some(i as i128)
+    } else {
+        n.as_u64().map(|u| u as i128)
     }
 }
 
@@ -504,6 +544,31 @@ invariants:
 "#;
         evaluate_yaml(source, json!({}), json!({"x": 42})).unwrap();
         assert!(evaluate_yaml(source, json!({}), json!({"x": 41})).is_err());
+    }
+
+    #[test]
+    fn at_least_uses_integer_comparison_beyond_f64_mantissa() {
+        // 9_007_199_254_740_993 == 2^53 + 1, the first integer that loses
+        // precision when round-tripped through f64. With the previous
+        // f64-only path, `>= 9007199254740993` accepted 9007199254740992,
+        // which is silently wrong.
+        let source = r#"
+version: 2
+invariants:
+  - name: precision
+    tool: x
+    fixed: {}
+    assert:
+      - kind: at_least
+        path: "$.response.n"
+        value: { value: 9007199254740993 }
+"#;
+        // Equal: must pass.
+        evaluate_yaml(source, json!({}), json!({"n": 9_007_199_254_740_993_i64})).unwrap();
+        // One below: must fail (used to silently pass via f64 rounding).
+        let err =
+            evaluate_yaml(source, json!({}), json!({"n": 9_007_199_254_740_992_i64})).unwrap_err();
+        assert!(matches!(err, RunnerError::Assertion(_)));
     }
 
     #[test]

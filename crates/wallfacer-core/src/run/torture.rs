@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::future::join_all;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,9 +17,11 @@ use crate::{
     corpus::Corpus,
     differential::response_value,
     finding::{Finding, FindingKind, ReproInfo},
+    target::SeverityConfig,
 };
 
 use super::{
+    destructive::DestructiveDetector,
     exec::McpExec,
     reporter::{Reporter, RunInfo},
 };
@@ -66,6 +68,12 @@ pub struct TortureRun {
     pub global_deadline: Duration,
     /// Transport label for `ReproInfo`.
     pub transport_name: String,
+    /// Destructive-tool detector. The torture loop bails before
+    /// invoking a target tool the detector marks destructive (and
+    /// allowlist hasn't unblocked).
+    pub detector: DestructiveDetector,
+    /// `[severity]` overrides from `wallfacer.toml`.
+    pub severity: SeverityConfig,
 }
 
 impl TortureRun {
@@ -77,6 +85,7 @@ impl TortureRun {
         concurrency: usize,
         timeout: Duration,
         transport_name: String,
+        detector: DestructiveDetector,
     ) -> Self {
         Self {
             mode,
@@ -87,7 +96,18 @@ impl TortureRun {
                 .checked_mul(GLOBAL_DEADLINE_FACTOR)
                 .unwrap_or(timeout),
             transport_name,
+            detector,
+            severity: SeverityConfig::default(),
         }
+    }
+
+    /// Replaces the `[severity]` overrides used when the run produces
+    /// findings. Defaults to none; override per call site if your
+    /// `wallfacer.toml` re-rates concurrency or state-leak findings.
+    #[must_use]
+    pub fn with_severity(mut self, severity: SeverityConfig) -> Self {
+        self.severity = severity;
+        self
     }
 
     /// Drives the torture loop.
@@ -97,6 +117,43 @@ impl TortureRun {
         corpus: &Corpus,
         reporter: &mut dyn Reporter,
     ) -> Result<TortureReport> {
+        // Destructive guard: in parallel mode we hammer `target_tool` N
+        // times; in state-leak mode we touch `session_set`/`session_get`.
+        // Refuse to fire either if the detector flags them and there's
+        // no allowlist match. We look the tool up via list_tools so
+        // annotations (`destructive_hint`) are honored alongside name
+        // patterns.
+        let live_tools = client
+            .list_tools()
+            .await
+            .context("failed to list tools from MCP server")?;
+        let names_to_check: &[&str] = match self.mode {
+            TortureMode::Parallel => &[self.target_tool.as_str()],
+            TortureMode::StateLeak => &["session_set", "session_get"],
+        };
+        let mut blocked = Vec::new();
+        for name in names_to_check {
+            if let Some(tool) = live_tools.iter().find(|t| t.name.as_ref() == *name) {
+                if !self.detector.classify(tool).is_runnable() {
+                    blocked.push((*name).to_string());
+                }
+            }
+        }
+        if !blocked.is_empty() {
+            reporter.on_run_start(&RunInfo {
+                kind: "torture",
+                total_iterations: 0,
+                tools: vec![self.target_tool.clone()],
+                blocked: blocked.clone(),
+                master_seed: None,
+            });
+            for name in &blocked {
+                reporter.on_skipped(name, "destructive tool not in allowlist");
+            }
+            reporter.on_run_end();
+            return Ok(TortureReport::default());
+        }
+
         reporter.on_run_start(&RunInfo {
             kind: "torture",
             total_iterations: self.concurrency as u64,
@@ -138,6 +195,12 @@ impl TortureRun {
 
         let mut report = TortureReport::default();
         for finding in findings {
+            let finding = if let Some(override_sev) = self.severity.resolve(finding.kind.keyword())
+            {
+                finding.with_severity(override_sev)
+            } else {
+                finding
+            };
             corpus.write_finding(&finding)?;
             reporter.on_finding(&finding);
             report.findings_count += 1;

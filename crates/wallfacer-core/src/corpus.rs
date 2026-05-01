@@ -85,7 +85,12 @@ impl Corpus {
 
         let _lock = CorpusLock::acquire(wallfacer_dir.join(".lock"), self.lock_timeout)?;
 
-        let tool_dir = self.root.join(&finding.tool);
+        // Tool names come from the MCP server, which we treat as
+        // semi-trusted: a misbehaving server could declare a name like
+        // `../../etc/x` and have us write outside `corpus_dir`. Sanitise
+        // before joining so the path stays inside `self.root`.
+        let safe_tool = sanitize_tool_name(&finding.tool);
+        let tool_dir = self.root.join(&safe_tool);
         fs::create_dir_all(&tool_dir).map_err(|source| CorpusError::CreateDir {
             path: tool_dir.clone(),
             source,
@@ -181,6 +186,30 @@ fn visit_json_files(path: &Path, visitor: &mut impl FnMut(&Path) -> Result<()>) 
     Ok(())
 }
 
+/// Returns a filesystem-safe form of a tool name: any character outside
+/// `[A-Za-z0-9_-]` is replaced with `_`. Empty input maps to `_`.
+///
+/// The harness treats MCP server output as semi-trusted (the server is
+/// what we are fuzzing), so tool names that flow into a filesystem path
+/// must never contain `/`, `\`, `..`, or NUL bytes. This helper is the
+/// single point of truth used by both the corpus and the inferred-schema
+/// directory.
+pub fn sanitize_tool_name(tool_name: &str) -> String {
+    if tool_name.is_empty() {
+        return "_".to_string();
+    }
+    tool_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn read_finding_file(path: &Path) -> Result<Finding> {
     let body = fs::read_to_string(path).map_err(|source| CorpusError::Read {
         path: path.to_path_buf(),
@@ -235,5 +264,52 @@ impl CorpusLock {
 impl Drop for CorpusLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::finding::{FindingKind, ReproInfo};
+    use serde_json::json;
+
+    #[test]
+    fn sanitize_strips_path_separators_and_traversal() {
+        // 2× ".." + 2× "/" = 6 sanitised chars before "etc".
+        assert_eq!(sanitize_tool_name("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_tool_name("..\\windows"), "___windows");
+        assert_eq!(sanitize_tool_name("ok_name-1"), "ok_name-1");
+        assert_eq!(sanitize_tool_name(""), "_");
+        assert_eq!(sanitize_tool_name("with space"), "with_space");
+        assert_eq!(sanitize_tool_name("nul\0byte"), "nul_byte");
+    }
+
+    #[test]
+    fn write_finding_keeps_output_inside_corpus_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("corpus");
+        let corpus = Corpus::new(root.clone());
+        let finding = Finding::new(
+            FindingKind::Crash,
+            "../../escape",
+            "msg",
+            "details",
+            ReproInfo {
+                seed: 0,
+                tool_call: json!({}),
+                transport: "stdio".to_string(),
+                composition_trail: Vec::new(),
+            },
+        );
+        let path = corpus.write_finding(&finding).unwrap();
+        // Resolve via absolute paths to defeat any `..` segment that would
+        // otherwise canonicalise outside the root.
+        let canon_root = std::fs::canonicalize(&root).unwrap();
+        let canon_path = std::fs::canonicalize(&path).unwrap();
+        assert!(
+            canon_path.starts_with(&canon_root),
+            "finding written outside corpus root: {canon_path:?} not under {canon_root:?}"
+        );
     }
 }

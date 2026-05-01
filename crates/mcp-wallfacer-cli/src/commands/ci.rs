@@ -7,7 +7,7 @@ use wallfacer_core::{
     corpus::Corpus,
     differential::inferred_schema_dir,
     finding::Severity,
-    run::{DifferentialPlan, DifferentialReport, Reporter},
+    run::{parse_duration, DestructiveDetector, DifferentialPlan, DifferentialReport, Reporter},
     target::Config,
 };
 
@@ -65,6 +65,9 @@ pub async fn run(args: CiArgs, config_path: Option<&Path>) -> Result<()> {
         schema_dir: inferred_schema_dir(),
         timeout: Duration::from_millis(config.target.timeout_ms),
         transport_name: config.target.transport_name().to_string(),
+        detector: DestructiveDetector::from_config(&config.destructive, &config.allow_destructive)
+            .context("invalid destructive / allowlist regex in config")?,
+        severity: config.severity.clone(),
     };
 
     let mut reporter: Box<dyn Reporter> = match args.format {
@@ -72,9 +75,29 @@ pub async fn run(args: CiArgs, config_path: Option<&Path>) -> Result<()> {
         OutputFormat::Json => Box::new(JsonReporter::new()),
         OutputFormat::Sarif => Box::new(SarifReporter::new()),
     };
-    let report: DifferentialReport = plan
-        .execute(&mut client, &corpus, reporter.as_mut())
-        .await?;
+    let max_duration = parse_duration(&args.max_duration).unwrap_or_else(|| {
+        eprintln!(
+            "warning: could not parse --max-duration `{}`; falling back to 10m",
+            args.max_duration
+        );
+        Duration::from_secs(600)
+    });
+    let report: DifferentialReport = match tokio::time::timeout(
+        max_duration,
+        plan.execute(&mut client, &corpus, reporter.as_mut()),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            client.shutdown().await.ok();
+            eprintln!(
+                "ci run exceeded --max-duration ({:?}); aborting",
+                max_duration
+            );
+            std::process::exit(2);
+        }
+    };
     client.shutdown().await.ok();
 
     let threshold: Severity = args.severity_threshold.into();

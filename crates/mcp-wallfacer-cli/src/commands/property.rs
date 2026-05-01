@@ -12,8 +12,8 @@ use wallfacer_core::{
     corpus::Corpus,
     property::dsl::InvariantFile,
     run::{
-        embedded_pack_names, resolve_pack, EmbeddedLoader, LayeredLoader, PackLoader, PropertyPlan,
-        Reporter,
+        embedded_pack_names, resolve_pack, DestructiveDetector, EmbeddedLoader, LayeredLoader,
+        PackLoader, PropertyPlan, Reporter,
     },
     target::Config,
 };
@@ -79,6 +79,9 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
         master_seed: args.seed.unwrap_or_else(rand::random),
         timeout: Duration::from_millis(config.target.timeout_ms),
         transport_name: config.target.transport_name().to_string(),
+        detector: DestructiveDetector::from_config(&config.destructive, &config.allow_destructive)
+            .context("invalid destructive / allowlist regex in config")?,
+        severity: config.severity.clone(),
     };
 
     let mut reporter: Box<dyn Reporter> = match args.format {

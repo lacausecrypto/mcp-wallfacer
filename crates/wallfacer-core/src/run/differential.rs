@@ -17,9 +17,11 @@ use crate::{
     finding::{Finding, FindingKind, ReproInfo, Severity},
     mutate::{generate_payload, GenMode},
     seed::{derive_seed, derive_seed_canonical},
+    target::SeverityConfig,
 };
 
 use super::{
+    destructive::DestructiveDetector,
     exec::McpExec,
     reporter::{Reporter, RunInfo},
 };
@@ -43,6 +45,10 @@ pub struct DifferentialReport {
     /// Tools whose declared output schema failed to compile.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub invalid_schema: Vec<String>,
+    /// Tools that were filtered out as destructive without an allowlist
+    /// match. Surfaced for visibility, not as findings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<String>,
 }
 
 /// Differential plan.
@@ -60,6 +66,13 @@ pub struct DifferentialPlan {
     pub timeout: Duration,
     /// Transport label for `ReproInfo`.
     pub transport_name: String,
+    /// Compiled destructive-tool detector built from
+    /// `[destructive]` + `[allow_destructive]` config. Tools the
+    /// detector marks as destructive (and not allowlisted) are skipped
+    /// rather than invoked, matching the behaviour of `FuzzPlan`.
+    pub detector: DestructiveDetector,
+    /// `[severity]` overrides from `wallfacer.toml`.
+    pub severity: SeverityConfig,
 }
 
 impl DifferentialPlan {
@@ -88,19 +101,35 @@ impl DifferentialPlan {
         corpus: &Corpus,
         reporter: &mut dyn Reporter,
     ) -> Result<DifferentialReport> {
-        let tools = client
+        let all_tools = client
             .list_tools()
             .await
             .context("failed to list tools from MCP server")?;
+        let mut blocked = Vec::new();
+        let tools: Vec<rmcp::model::Tool> = all_tools
+            .into_iter()
+            .filter(|tool| {
+                let classification = self.detector.classify(tool);
+                if classification.is_runnable() {
+                    true
+                } else {
+                    blocked.push(tool.name.to_string());
+                    false
+                }
+            })
+            .collect();
         reporter.on_run_start(&RunInfo {
             kind: "differential",
             total_iterations: tools.len() as u64 * self.iterations,
             tools: tools.iter().map(|t| t.name.to_string()).collect(),
-            blocked: Vec::new(),
+            blocked: blocked.clone(),
             master_seed: Some(self.master_seed),
         });
 
-        let mut report = DifferentialReport::default();
+        let mut report = DifferentialReport {
+            blocked,
+            ..DifferentialReport::default()
+        };
 
         for tool in &tools {
             let tool_name = tool.name.to_string();
@@ -146,7 +175,7 @@ impl DifferentialPlan {
                             .map(|err| format!("{err} at instance path {}", err.instance_path()))
                             .collect::<Vec<_>>();
                         if !errors.is_empty() {
-                            let finding = Finding::new(
+                            let mut finding = Finding::new(
                                 FindingKind::SchemaViolation,
                                 tool_name.clone(),
                                 "tool response does not match output schema",
@@ -162,6 +191,11 @@ impl DifferentialPlan {
                                     composition_trail: Vec::new(),
                                 },
                             );
+                            if let Some(override_sev) =
+                                self.severity.resolve(finding.kind.keyword())
+                            {
+                                finding = finding.with_severity(override_sev);
+                            }
                             corpus.write_finding(&finding)?;
                             reporter.on_finding(&finding);
                             report.findings_count += 1;
