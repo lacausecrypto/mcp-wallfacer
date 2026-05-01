@@ -4,6 +4,86 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.5.0 — 2026-05-01
+
+Three new commands targeting **bootstrap, observability, and reach**.
+The wallfacer CLI grows from 13 to 16 verbs; v0.4 packs continue to
+work unchanged. v0.4.3 binaries are still installed by the npm / pip
+wrappers until v0.5.0's binaries land — both wrappers default to
+their `package version` GitHub tag, which now points at v0.5.0.
+
+### Added — `wallfacer suggest` (Phase P)
+
+* New CLI verb. Connects to the configured target, lists its tools,
+  and infers which embedded rule packs apply, with parameter
+  overrides pre-filled from the observable tool catalog.
+* Heuristics cover all 17 packs:
+  - schema-driven (string-typed witness for `secrets-leakage` /
+    `unicode` / `large-payload`),
+  - field-name driven (`path`, `query`, `command`, `prompt` →
+    `path-traversal` / `injection-sql` / `injection-shell` /
+    `prompt-injection`),
+  - tool-name driven (`whoami` → `auth`, `run_*`/`exec_*` →
+    `injection-shell`),
+  - annotation-driven (any `readOnlyHint` / `destructiveHint` /
+    `idempotentHint` / `openWorldHint` triggers `tool-annotations`),
+  - sequence inference (a `<prefix>_create` / `<prefix>_read` /
+    `<prefix>_delete` triple → `stateful` with the trio bound to
+    the right tool names; `*login*` + `*logout*` pair → `auth-flow`).
+* Three output formats: `human` (table + TOML snippet + run command),
+  `toml` (just the `[packs.<name>]` blocks for piping into
+  `wallfacer.toml`), `json` (for scripting).
+* Public API: `wallfacer_core::suggest::{suggest_packs, PackSuggestion}`.
+
+### Added — `wallfacer coverage` (Phase Q)
+
+* Static analysis: walks the parsed pack files (`invariants` +
+  `for_each_tool` + `sequences`) and the live `list_tools` output to
+  build a `(tool, pack)` matrix without invoking a single tool.
+* Per-cell verdict: `Covered` / `Blocked` (destructive guard would
+  refuse to run) / `Uncovered`. Surfaces tools no pack would
+  exercise as a separate `uncovered_tools` list.
+* `--strict` flag exits `2` when at least one tool is uncovered —
+  drop-in CI gate for "every tool must be touched by some pack".
+* Two output formats: `human` (coloured terminal grid + summary
+  line) and `json`.
+* Public API: `wallfacer_core::coverage::{CoverageMatrix, CoverageCell}`.
+
+### Added — `wallfacer report` (Phase U)
+
+* Renders a self-contained dashboard from the persisted findings
+  under `.wallfacer/corpus/`. The HTML output has inline CSS, no
+  JavaScript, and zero external assets — open the file in any
+  browser, e-mail it, archive it, no internet required.
+* Sections: summary cards (total / per-severity), breakdown by
+  finding kind and tool, full findings table with collapsible
+  per-finding detail blocks, optional coverage matrix when supplied.
+* HTML-escapes every user-supplied string (finding messages,
+  details, tool names, ids, timestamps) — covered by an e2e test.
+* Two output formats: `html` (the dashboard) and `json` (for
+  scripted aggregation).
+* Public API: `wallfacer_core::report::{render_html, ReportInputs}`.
+
+### Tests & quality
+
+* New e2e suites: `suggest_proposes_packs`, `coverage_reports_gaps`,
+  `report_renders_html` — each gates the new command against the
+  python_server fixture.
+* `pack test --all` still 117/117. `cargo fmt`, `cargo clippy -D
+  warnings`, `cargo test --workspace --locked`, and
+  `RUSTDOCFLAGS=-D warnings cargo doc --no-deps` all clean.
+
+### Notes
+
+* The roadmap's "real-world findings tracker filled" item (Phase
+  T-flavoured deliverable) remains user-driven and is **not** part of
+  v0.5.0. The new commands give operators the tooling to triage and
+  share findings; actually filling the tracker is a campaign action,
+  not a code change.
+* Phase R (stateful fuzzing with corpus feedback) and Phase S
+  (`mcp-spec-conformance` pack) from the v0.5 audit were deferred —
+  they're targeted at v0.6.
+
 ## v0.4.3 — 2026-05-01
 
 Tooling-only patch — no functional change to the wallfacer CLI.

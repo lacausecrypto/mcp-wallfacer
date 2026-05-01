@@ -14,7 +14,7 @@ name = "wallfacer-tools"
 path = "src/main.rs"
 
 [dependencies]
-wallfacer-core = { version = "0.4.3", path = "../wallfacer-core" }
+wallfacer-core = { version = "0.5.0", path = "../wallfacer-core" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

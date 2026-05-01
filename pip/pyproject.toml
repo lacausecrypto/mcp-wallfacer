@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-wallfacer"
-version = "0.4.3"
+version = "0.5.0"
 description = "Runtime fuzzing and invariant-testing harness for MCP servers."
 readme = "README.md"
 requires-python = ">=3.9"

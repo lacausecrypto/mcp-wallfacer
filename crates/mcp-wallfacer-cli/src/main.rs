@@ -37,6 +37,18 @@ enum Command {
     /// Manage rule packs: list, show, init, test (offline fixture
     /// runner), params.
     Pack(commands::pack::PackArgs),
+    /// Phase P — connect to the configured target, list its tools, and
+    /// suggest which embedded rule packs apply (with parameter
+    /// overrides pre-filled from the observable tool catalog).
+    Suggest(commands::suggest::SuggestArgs),
+    /// Phase Q — print a static `(tool, pack)` coverage matrix from
+    /// the configured target's tool list and the pack set; supports
+    /// `--strict` to gate CI on tools no pack would exercise.
+    Coverage(commands::coverage::CoverageArgs),
+    /// Phase U — render a self-contained HTML / JSON dashboard from
+    /// the persisted findings under the corpus directory. Open the
+    /// HTML output in any browser, no internet / server required.
+    Report(commands::report::ReportArgs),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -58,6 +70,9 @@ async fn main() -> Result<()> {
         Some(Command::Replay(args)) => commands::replay::run(args, cli.config.as_deref()).await,
         Some(Command::Diff(args)) => commands::diff::run(args).await,
         Some(Command::Pack(args)) => commands::pack::run(args, cli.config.as_deref()).await,
+        Some(Command::Suggest(args)) => commands::suggest::run(args, cli.config.as_deref()).await,
+        Some(Command::Coverage(args)) => commands::coverage::run(args, cli.config.as_deref()).await,
+        Some(Command::Report(args)) => commands::report::run(args, cli.config.as_deref()).await,
         None => {
             println!("mcp-wallfacer {}", env!("CARGO_PKG_VERSION"));
             Ok(())

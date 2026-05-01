@@ -7,9 +7,9 @@ branding:
 
 inputs:
   version:
-    description: "wallfacer release tag to install (e.g. `v0.4.3`). Defaults to the action's pinned version."
+    description: "wallfacer release tag to install (e.g. `v0.5.0`). Defaults to the action's pinned version."
     required: false
-    default: "v0.4.3"
+    default: "v0.5.0"
   pack:
     description: "Pack(s) to run. Repeat with newline-separated values for multiple packs. Mutually exclusive with `pack-all`."
     required: false

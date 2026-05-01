@@ -5,14 +5,17 @@
 
 pub mod client;
 pub mod corpus;
+pub mod coverage;
 pub mod differential;
 pub mod finding;
 pub mod mutate;
 pub mod property;
 pub mod redact;
+pub mod report;
 pub mod run;
 pub mod sarif;
 pub mod seed;
+pub mod suggest;
 pub mod target;
 
 #[cfg(test)]

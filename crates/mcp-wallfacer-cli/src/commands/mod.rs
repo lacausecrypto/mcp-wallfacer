@@ -1,5 +1,6 @@
 pub mod ci;
 pub mod corpus;
+pub mod coverage;
 pub mod diff;
 pub mod differential;
 pub mod doctor;
@@ -8,5 +9,7 @@ pub mod init;
 pub mod pack;
 pub mod property;
 pub mod replay;
+pub mod report;
+pub mod suggest;
 pub mod torture;
 pub mod unredact;
