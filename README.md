@@ -71,7 +71,7 @@ Five canonical channels, one binary. Full details in [`docs/install.md`](docs/in
 | **GitHub release** | [download tarball](https://github.com/lacausecrypto/mcp-wallfacer/releases) | air-gapped servers, no toolchain |
 | **npm** | `npm install -g mcp-wallfacer` | TypeScript / Node MCP authors |
 | **pip** | `pip install mcp-wallfacer` | Python MCP authors |
-| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.6.0` | CI gating with caching |
+| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.8.0` | CI gating with caching |
 
 The npm and pip wrappers are thin launchers that download the matching prebuilt binary from the GitHub release at install / first-run time; the underlying CLI is byte-identical to a `cargo install` build of the same version. The crates.io package is `mcp-wallfacer`; the installed binary is `wallfacer`.
 
@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lacausecrypto/mcp-wallfacer@v0.6.0
+      - uses: lacausecrypto/mcp-wallfacer@v0.8.0
         with:
           pack-all: "true"          # or pack: "security\nstateful"
           config: wallfacer.toml
