@@ -4,6 +4,71 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.3.3 — 2026-05-01
+
+Patch driven by a real-world test campaign against seven public MCP
+servers (`mcp-belgium`, `mcp-sophon`, `@modelcontextprotocol/{server-everything,
+server-filesystem, server-memory, server-sequential-thinking}`,
+`@upstash/context7-mcp`). Every "finding" produced by the campaign turned
+out to be a wallfacer bug, not a target bug — so this release fixes the
+three classes that hid behind the noise.
+
+### Fixed
+
+* **`wallfacer doctor` now respects MCP `ServerCapabilities`.** Doctor
+  used to call `resources/list` and `prompts/list` unconditionally, so
+  any server that didn't declare those capabilities at init time
+  bailed out with `MCP error -32601: method not found`. Doctor now
+  checks `Client::server_capabilities()` and renders `n/a` for
+  capabilities the server didn't advertise. Affected: every MCP server
+  that exposes only tools (`mcp-sophon`, `@modelcontextprotocol/server-filesystem`,
+  `@upstash/context7-mcp`, …).
+* **Property runner skips invariants whose target tool the server
+  doesn't advertise.** Pack defaults like `witness_tool: "echo"` used
+  to drag the runner into a reconnect-on-`method-not-found` loop that
+  looked like a hang to the operator (observed on `mcp-sophon` during
+  the unicode pack). Missing tools are now reported via
+  `Reporter::on_skipped` and surfaced under
+  `PropertyReport::missing_tools` so the operator can either override
+  the pack parameter or accept the gap.
+
+### Added
+
+* **`apply.input: schema_valid`** — new strategy on
+  `for_each_tool.apply` blocks. When set, the runner generates the
+  per-case input from the live tool's `inputSchema` using
+  `mutate::generate_payload(GenMode::Conform)` instead of falling back
+  to `fixed: {}`. This unblocks the entire class of `tool-annotations`
+  invariants that used to fire on legitimate schema-validation errors
+  (a tool requiring a `path` argument was getting called with `{}` and
+  returning `isError: true`, which the invariant interpreted as a
+  contract violation rather than a missing-argument rejection).
+* `Client::server_capabilities()` returning a clone of the announced
+  `ServerCapabilities`. `Client::list_resources` /
+  `Client::list_prompts` short-circuit to `Ok(vec![])` when the
+  corresponding capability isn't advertised.
+
+### Changed
+
+* **`tool-annotations` pack rewritten** to focus on the MCP wire-format
+  contract instead of behavioural assumptions. Two invariants now:
+  1. `envelope_well_formed.<tool>`: every response must include a
+     `content` array (applies to every tool, including those returning
+     `isError: true`).
+  2. `open_world_no_internal_path_leak.<tool>`: openWorld-hinted tools
+     must not echo `/Users/`, `/home/`, `C:\Users\` paths in their
+     text content. Now safe against tools that return non-text content
+     (image, blob): the regex check is wrapped in `any_of` with a
+     fallback that matches when `content[0].text` isn't a string.
+  The previous `read_only_call_does_not_set_isError` and
+  `idempotent_call_yields_structured_response` invariants are removed
+  — they required target-specific knowledge (which paths exist, what
+  state mutates) that a generic pack can't have. Operators who want
+  those checks should write per-server invariants in their own
+  workspace `packs/`.
+* `for_each_tool[*].where` is now optional. Templates that apply to
+  every tool no longer need an empty `where: {}`.
+
 ## v0.3.2 — 2026-05-01
 
 Patch focused on correctness and footgun-removal in the run plans and

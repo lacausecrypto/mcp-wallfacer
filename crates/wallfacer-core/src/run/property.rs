@@ -12,6 +12,7 @@ use crate::{
     client::CallOutcome,
     corpus::Corpus,
     finding::{Finding, FindingKind, ReproInfo},
+    mutate::{generate_payload, GenMode},
     property::{dsl, runner},
     seed::{derive_seed, derive_seed_canonical},
     target::SeverityConfig,
@@ -36,6 +37,26 @@ pub struct PropertyReport {
     /// findings.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocked: Vec<String>,
+    /// Invariants whose target tool was not present on the server.
+    /// Typically a pack's default `witness_tool` parameter that doesn't
+    /// match this particular target's tool catalog. Surfaced as a
+    /// `(tool, invariant)` pair so the operator can either override the
+    /// pack parameter or accept the gap.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_tools: Vec<MissingTool>,
+}
+
+/// One invariant skipped because its target tool is not advertised by
+/// the server. Reporter surfaces this distinct from `blocked` so the
+/// operator can tell pack-parameter mismatches apart from
+/// destructive-guard skips.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingTool {
+    /// Invariant name (post `for_each_tool` expansion).
+    pub invariant: String,
+    /// Tool name that the invariant targeted but the server didn't
+    /// advertise.
+    pub tool: String,
 }
 
 /// Property plan.
@@ -96,20 +117,29 @@ impl PropertyPlan {
             .collect();
 
         let mut blocked = Vec::new();
+        let mut missing_tools = Vec::new();
         let runnable_invariants: Vec<dsl::Invariant> = all_invariants
             .into_iter()
-            .filter(|invariant| {
-                let runnable = match tool_index.get(&invariant.tool) {
-                    Some(tool) => self.detector.classify(tool).is_runnable(),
-                    // Tool not present on the server. Let the runner
-                    // surface the failure naturally; classification
-                    // doesn't have a Tool struct to inspect.
-                    None => true,
-                };
-                if !runnable {
-                    blocked.push(invariant.tool.clone());
+            .filter(|invariant| match tool_index.get(&invariant.tool) {
+                Some(tool) => {
+                    let runnable = self.detector.classify(tool).is_runnable();
+                    if !runnable {
+                        blocked.push(invariant.tool.clone());
+                    }
+                    runnable
                 }
-                runnable
+                None => {
+                    // Tool not advertised by the server. Skipping rather
+                    // than invoking it is safer than letting the runner
+                    // hammer reconnect on every "method not found":
+                    // packs ship default `witness_tool` parameters that
+                    // legitimately don't apply to every target.
+                    missing_tools.push(MissingTool {
+                        invariant: invariant.name.clone(),
+                        tool: invariant.tool.clone(),
+                    });
+                    false
+                }
             })
             .collect();
 
@@ -128,8 +158,22 @@ impl PropertyPlan {
             master_seed: Some(self.master_seed),
         });
 
+        // Surface every skipped invariant to the reporter so JSON
+        // consumers see them under `skipped` and the human reporter
+        // prints a "Skipped tool" row.
+        for missing in &missing_tools {
+            reporter.on_skipped(
+                &missing.tool,
+                &format!(
+                    "not advertised by server (invariant `{}`)",
+                    missing.invariant
+                ),
+            );
+        }
+
         let mut report = PropertyReport {
             blocked,
+            missing_tools,
             ..PropertyReport::default()
         };
         for invariant in &runnable_invariants {
@@ -140,7 +184,24 @@ impl PropertyPlan {
                 let canonical =
                     derive_seed_canonical(self.master_seed, &invariant.name, case_index as u64);
                 let mut rng = ChaCha20Rng::from_seed(canonical);
-                let input = runner::input_for_case(invariant, case_index, &mut rng);
+                // `input: schema_valid` overrides `fixed`/`generate` and
+                // pulls a payload conforming to the live tool's input
+                // schema. Falls back to the static input pipeline when
+                // the schema isn't usable (e.g. unresolved $ref) or
+                // when the tool isn't in `tool_index` — the latter
+                // shouldn't happen because missing tools are filtered
+                // earlier, but we handle it defensively.
+                let input = if invariant.input == Some(dsl::InputMode::SchemaValid) {
+                    tool_index
+                        .get(&invariant.tool)
+                        .and_then(|tool| {
+                            let schema = serde_json::to_value(tool.input_schema.as_ref()).ok()?;
+                            Some(generate_payload(&schema, &mut rng, GenMode::Conform))
+                        })
+                        .unwrap_or_else(|| runner::input_for_case(invariant, case_index, &mut rng))
+                } else {
+                    runner::input_for_case(invariant, case_index, &mut rng)
+                };
                 let response = invoke(client, &invariant.tool, input.clone(), self.timeout).await;
 
                 if let Err(error) = runner::evaluate(invariant, input.clone(), response.clone()) {

@@ -17,7 +17,7 @@ use std::{
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, Prompt, Resource, Tool},
+    model::{CallToolRequestParams, CallToolResult, Prompt, Resource, ServerCapabilities, Tool},
     service::{RoleClient, RunningService, RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         async_rw::AsyncRwTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -110,7 +110,37 @@ impl Client {
             .map_err(|error| ClientError::Request(error.to_string()))
     }
 
+    /// Returns a clone of the server's announced [`ServerCapabilities`]
+    /// from the initial `initialize` handshake, or `None` if the client
+    /// has been shut down or the handshake hadn't completed.
+    ///
+    /// Per MCP spec, clients should not call `resources/list` or
+    /// `prompts/list` against a server that didn't declare the
+    /// corresponding capability — doing so produces a noisy
+    /// `-32601 method not found` from compliant servers. Use this to
+    /// gate optional listing calls.
+    pub async fn server_capabilities(&self) -> Option<ServerCapabilities> {
+        let guard = self.service.read().await;
+        guard
+            .as_ref()
+            .and_then(|service| service.peer_info())
+            .map(|info| info.capabilities.clone())
+    }
+
+    /// Lists the server's resources. Returns `Ok(vec![])` (silently)
+    /// when the server didn't declare the `resources` capability at
+    /// init time — this avoids spamming a `-32601 method not found`
+    /// failure for servers that legitimately don't expose resources.
+    /// Callers needing to distinguish "not advertised" from "empty"
+    /// should check [`Self::server_capabilities`] first.
     pub async fn list_resources(&self) -> Result<Vec<Resource>> {
+        let advertises = self
+            .server_capabilities()
+            .await
+            .is_some_and(|caps| caps.resources.is_some());
+        if !advertises {
+            return Ok(Vec::new());
+        }
         let guard = self.service.read().await;
         let service = guard
             .as_ref()
@@ -121,7 +151,17 @@ impl Client {
             .map_err(|error| ClientError::Request(error.to_string()))
     }
 
+    /// Lists the server's prompts. Same capability-aware short-circuit
+    /// as [`Self::list_resources`]: returns `Ok(vec![])` when the
+    /// server didn't declare the `prompts` capability.
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
+        let advertises = self
+            .server_capabilities()
+            .await
+            .is_some_and(|caps| caps.prompts.is_some());
+        if !advertises {
+            return Ok(Vec::new());
+        }
         let guard = self.service.read().await;
         let service = guard
             .as_ref()

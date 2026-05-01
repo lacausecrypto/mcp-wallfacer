@@ -2,109 +2,89 @@
 #
 # MCP 2025-06-18 introduced `tool.annotations.{readOnlyHint,
 # destructiveHint, idempotentHint, openWorldHint}`. This pack iterates
-# every tool the server declares and verifies the annotations are
-# *truthful* — a `readOnlyHint: true` tool that mutates server state
-# is a worse bug than no annotation at all because clients trust them.
+# every tool the server declares and verifies the response envelope
+# stays MCP-compliant under each annotation contract.
 #
-# Phase I: uses `for_each_tool` to expand at run time against the live
-# tool list. `wallfacer pack test` evaluates the apply template against
-# a synthetic placeholder so the fixtures still gate CI quality.
+# v0.3.3 lesson — the previous invariants asserted that
+# `readOnly`/`idempotent` tools never set `isError: true`, but that
+# fires on any legitimate not-found / permission-denied response. A
+# tool returning `isError: true` for a missing file is *correct
+# behaviour*, not a violation of the read-only contract. The pack now
+# focuses on the MCP wire-format properties that are verifiable
+# without target-specific knowledge:
+#
+# * the response envelope is well-formed (a `content` array exists),
+# * `openWorldHint` tools don't leak local filesystem paths in their
+#   text content (a soft information-disclosure check).
+#
+# Stricter invariants (e.g. "destructive call requires confirmation
+# token") are out of scope for a generic pack — they need per-server
+# parametrisation in the operator's `wallfacer.toml`.
 version: 3
 metadata:
   name: tool-annotations
-  description: "Verifies MCP tool annotations agree with observable runtime behaviour."
+  description: "Verifies MCP tool annotations agree with envelope-shape contracts."
   authors: ["wallfacer-core"]
   tags: [security, annotations, mcp-spec]
 
 invariants: []
 
 for_each_tool:
-  - name: "tool-annotations.read_only_call_does_not_set_isError.{{tool_name}}"
-    where:
-      annotations:
-        readOnlyHint: true
+  - name: "tool-annotations.envelope_well_formed.{{tool_name}}"
+    # Every tool, regardless of annotations. The MCP spec requires a
+    # `content` array on every successful response and on every
+    # `isError: true` response.
     apply:
-      fixed: {}
+      input: schema_valid
       assert:
-        # A read-only tool called with no arguments must produce a
-        # well-formed envelope; if it crashes (isError=true) the
-        # readOnlyHint claim is vacuous.
         - kind: matches_schema
           path: "$.response"
           schema:
             type: object
             required: [content]
-        - kind: equals
-          lhs: { path: "$.response.isError" }
-          rhs: { value: false }
+            properties:
+              content:
+                type: array
       test_fixtures:
-        - name: "passes for healthy read-only call"
+        - name: "passes for healthy success envelope"
           response: { isError: false, content: [{ type: "text", text: "ok" }] }
           expect: pass
-        - name: "fails when isError true on a read-only tool"
-          response: { isError: true, content: [{ type: "text", text: "boom" }] }
-          expect: fail
-
-  - name: "tool-annotations.destructive_tool_returns_envelope_not_panic.{{tool_name}}"
-    where:
-      annotations:
-        destructiveHint: true
-    apply:
-      fixed: {}
-      assert:
-        - kind: matches_schema
-          path: "$.response"
-          schema:
-            type: object
-            required: [content]
-      test_fixtures:
-        - name: "passes when envelope present"
-          response: { content: [{ type: "text", text: "deleted 1 row" }] }
+        - name: "passes for graceful error envelope"
+          response: { isError: true, content: [{ type: "text", text: "not found" }] }
           expect: pass
-        - name: "fails when content key missing"
+        - name: "fails when content array missing"
           response: { isError: true }
           expect: fail
 
-  - name: "tool-annotations.idempotent_call_yields_structured_response.{{tool_name}}"
-    where:
-      annotations:
-        idempotentHint: true
-    apply:
-      fixed: {}
-      assert:
-        # Idempotent tools should expose `structuredContent` so clients
-        # can compare two consecutive calls without parsing free text.
-        - kind: matches_schema
-          path: "$.response"
-          schema:
-            type: object
-            required: [structuredContent]
-      test_fixtures:
-        - name: "passes when structured content returned"
-          response: { structuredContent: { id: 1 }, content: [] }
-          expect: pass
-        - name: "fails when no structuredContent"
-          response: { content: [{ type: "text", text: "ok" }] }
-          expect: fail
-
-  - name: "tool-annotations.open_world_call_does_not_leak_internal_paths.{{tool_name}}"
+  - name: "tool-annotations.open_world_no_internal_path_leak.{{tool_name}}"
     where:
       annotations:
         openWorldHint: true
     apply:
-      fixed: {}
+      input: schema_valid
       assert:
         # Open-world tools talk to remote services; the remote may emit
         # paths or stack traces. Reject those to keep the envelope
-        # client-friendly.
-        - kind: not
-          assertion:
-            kind: matches_regex
-            path: "$.response.content[0].text"
-            pattern: "(?:/Users/|/home/|C:\\\\\\\\Users)[^\\s]+"
+        # client-friendly. Bare `text` lookup; tools that return only
+        # binary or non-text content trivially pass.
+        - kind: any_of
+          assert:
+            - kind: not
+              assertion:
+                kind: is_type
+                path: "$.response.content[0].text"
+                type: string
+            - kind: not
+              assertion:
+                kind: matches_regex
+                path: "$.response.content[0].text"
+                pattern: "(?:/Users/|/home/|C:\\\\\\\\Users)[^\\s]+"
       test_fixtures:
         - name: "passes when text is sanitised"
           response: { content: [{ type: "text", text: "service unavailable" }] }
+          expect: pass
+        - name: "passes when first content item has no text"
+          response: { content: [{ type: "image", data: "..." }] }
           expect: pass
         - name: "fails when local path leaks"
           response:

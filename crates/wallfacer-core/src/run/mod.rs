@@ -35,6 +35,6 @@ pub use pack::{
     embedded_pack_names, embedded_pack_source, resolve as resolve_pack, EmbeddedLoader,
     LayeredLoader, PackError, PackLoader, EMBEDDED_PACKS,
 };
-pub use property::{parse_invariants, PropertyPlan, PropertyReport};
+pub use property::{parse_invariants, MissingTool, PropertyPlan, PropertyReport};
 pub use reporter::{NoopReporter, Reporter, RunInfo};
 pub use torture::{parse_duration, TortureMode, TortureReport, TortureRun};

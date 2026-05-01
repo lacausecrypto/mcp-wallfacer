@@ -97,8 +97,11 @@ pub struct ForEachToolBlock {
     /// Invariant name template. May contain `{{tool_name}}`, replaced
     /// at expansion time with the matched tool's name.
     pub name: String,
-    /// Filter that decides which tools the template applies to.
-    #[serde(rename = "where")]
+    /// Filter that decides which tools the template applies to. When
+    /// omitted, the template applies to *every* tool the server
+    /// declares — useful for envelope-shape invariants that don't care
+    /// about specific annotations.
+    #[serde(rename = "where", default)]
     pub matches: ToolMatch,
     /// Body of the generated invariant, minus `name` (provided by the
     /// block) and `tool` (auto-set to the matched tool's name).
@@ -166,6 +169,10 @@ impl ToolAnnotationMatch {
 /// and `tool` — those are supplied by the block at expansion time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApplyTemplate {
+    /// Optional input strategy. When set, overrides `fixed` and
+    /// `generate`. See [`InputMode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<BTreeMap<String, ValueSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,6 +183,24 @@ pub struct ApplyTemplate {
     pub assertions: Vec<Assertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_fixtures: Vec<TestFixture>,
+}
+
+/// Input strategy for a `for_each_tool` invariant. Resolves at run
+/// time against the live tool list (the runner has access to each
+/// tool's input schema and annotations).
+///
+/// The default behaviour (when `input` is omitted) is unchanged from
+/// v0.3.0–v0.3.2: the runner uses `fixed:` if set, otherwise
+/// `generate:`, otherwise an empty `{}` payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMode {
+    /// Generate a payload matching the live tool's input schema with
+    /// [`crate::mutate::schema_gen::GenMode::Conform`]. Use when an
+    /// invariant tests the *valid-input* contract of a tool: the
+    /// pre-v0.3.3 default of `fixed: {}` would trigger schema-validation
+    /// errors on tools with required parameters and mask real bugs.
+    SchemaValid,
 }
 
 /// `metadata` block of a v3 invariants file. Acts as the pack header
@@ -245,6 +270,11 @@ pub enum ParamKind {
 pub struct Invariant {
     pub name: String,
     pub tool: String,
+    /// Input strategy. See [`InputMode`]. When `Some`, the runner
+    /// derives the per-case input from the live tool's metadata
+    /// instead of from `fixed`/`generate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<BTreeMap<String, ValueSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +549,7 @@ pub fn synthesize_for_test(block: &ForEachToolBlock, placeholder: &str) -> Resul
     Ok(Invariant {
         name,
         tool: placeholder.to_string(),
+        input: apply.input,
         generate: apply.generate,
         fixed: apply.fixed,
         cases: apply.cases,
@@ -583,6 +614,7 @@ pub fn expand_for_each_tool(
             out.push(Invariant {
                 name,
                 tool: tool_name.to_string(),
+                input: apply.input,
                 generate: apply.generate,
                 fixed: apply.fixed,
                 cases: apply.cases,
@@ -1088,6 +1120,37 @@ invariants:
             tool = tool.annotate(annotations);
         }
         tool
+    }
+
+    #[test]
+    fn for_each_tool_apply_parses_input_schema_valid() {
+        let source = r#"
+version: 3
+metadata:
+  name: schema-valid
+for_each_tool:
+  - name: "schema-valid.{{tool_name}}"
+    where:
+      annotations:
+        readOnlyHint: true
+    apply:
+      input: schema_valid
+      assert:
+        - kind: equals
+          lhs: { path: "$.response.isError" }
+          rhs: { value: false }
+invariants: []
+"#;
+        let file = parse(source).expect("parse");
+        assert_eq!(file.for_each_tool.len(), 1);
+        assert_eq!(
+            file.for_each_tool[0].apply.input,
+            Some(InputMode::SchemaValid),
+            "`input: schema_valid` did not deserialise into the new enum"
+        );
+        // `fixed` and `generate` stay None when only `input:` is set.
+        assert!(file.for_each_tool[0].apply.fixed.is_none());
+        assert!(file.for_each_tool[0].apply.generate.is_none());
     }
 
     #[test]

@@ -15,14 +15,35 @@ pub async fn run(_args: DoctorArgs, config_path: Option<&Path>) -> Result<()> {
         .context("failed to connect to MCP target")?;
 
     let tools = client.list_tools().await.context("failed to list tools")?;
-    let resources = client
-        .list_resources()
-        .await
-        .context("failed to list resources")?;
-    let prompts = client
-        .list_prompts()
-        .await
-        .context("failed to list prompts")?;
+    // Capability-aware listing: `list_resources` / `list_prompts`
+    // already short-circuit to an empty vec when the server didn't
+    // advertise the capability, but we want the doctor table to show
+    // "n/a" rather than "0" so the operator can tell "server
+    // declares the cap, vector is empty" from "server didn't declare
+    // the cap at all".
+    let capabilities = client.server_capabilities().await;
+    let supports_resources = capabilities
+        .as_ref()
+        .is_some_and(|caps| caps.resources.is_some());
+    let supports_prompts = capabilities
+        .as_ref()
+        .is_some_and(|caps| caps.prompts.is_some());
+    let resources = if supports_resources {
+        client
+            .list_resources()
+            .await
+            .context("failed to list resources")?
+    } else {
+        Vec::new()
+    };
+    let prompts = if supports_prompts {
+        client
+            .list_prompts()
+            .await
+            .context("failed to list prompts")?
+    } else {
+        Vec::new()
+    };
 
     let mut summary = Table::new();
     summary.load_preset(UTF8_FULL);
@@ -31,8 +52,16 @@ pub async fn run(_args: DoctorArgs, config_path: Option<&Path>) -> Result<()> {
         Cell::new(path.display()),
         Cell::new(config.target.transport_name()),
         Cell::new(tools.len()),
-        Cell::new(resources.len()),
-        Cell::new(prompts.len()),
+        Cell::new(if supports_resources {
+            resources.len().to_string()
+        } else {
+            "n/a".to_string()
+        }),
+        Cell::new(if supports_prompts {
+            prompts.len().to_string()
+        } else {
+            "n/a".to_string()
+        }),
     ]);
     println!("{summary}");
 
