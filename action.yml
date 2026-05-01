@@ -1,0 +1,154 @@
+name: "wallfacer"
+description: "Run mcp-wallfacer rule packs against an MCP server in CI."
+author: "lacausecrypto"
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  version:
+    description: "wallfacer release tag to install (e.g. `v0.4.1`). Defaults to the action's pinned version."
+    required: false
+    default: "v0.4.1"
+  pack:
+    description: "Pack(s) to run. Repeat with newline-separated values for multiple packs. Mutually exclusive with `pack-all`."
+    required: false
+    default: ""
+  pack-all:
+    description: "Run every embedded pack. `true` / `false`."
+    required: false
+    default: "false"
+  config:
+    description: "Path to wallfacer.toml. Defaults to `wallfacer.toml` at workspace root."
+    required: false
+    default: "wallfacer.toml"
+  format:
+    description: "Output format: `human`, `json`, or `sarif`."
+    required: false
+    default: "human"
+  seed:
+    description: "Master seed for deterministic re-runs (integer). Empty = random."
+    required: false
+    default: ""
+  cases:
+    description: "Default number of cases per invariant when not overridden in YAML."
+    required: false
+    default: "100"
+  fail-on-finding:
+    description: "Exit non-zero when wallfacer surfaces at least one finding. `true` / `false`."
+    required: false
+    default: "true"
+
+outputs:
+  findings-json:
+    description: "Path to the JSON envelope when `format: json` is selected."
+    value: ${{ steps.run.outputs.findings-json }}
+  findings-sarif:
+    description: "Path to the SARIF report when `format: sarif` is selected."
+    value: ${{ steps.run.outputs.findings-sarif }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Detect runner platform
+      id: detect
+      shell: bash
+      run: |
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64)   triple=x86_64-unknown-linux-gnu  ; ext=tar.gz ; bin=wallfacer ;;
+          Linux-aarch64)  triple=aarch64-unknown-linux-gnu ; ext=tar.gz ; bin=wallfacer ;;
+          Darwin-x86_64)  triple=x86_64-apple-darwin       ; ext=tar.gz ; bin=wallfacer ;;
+          Darwin-arm64)   triple=aarch64-apple-darwin      ; ext=tar.gz ; bin=wallfacer ;;
+          MINGW*|MSYS*|CYGWIN*) triple=x86_64-pc-windows-msvc ; ext=zip ; bin=wallfacer.exe ;;
+          *) echo "::error::unsupported runner $(uname -s)-$(uname -m)"; exit 1 ;;
+        esac
+        echo "triple=$triple"   >> "$GITHUB_OUTPUT"
+        echo "ext=$ext"         >> "$GITHUB_OUTPUT"
+        echo "bin=$bin"         >> "$GITHUB_OUTPUT"
+
+    - name: Cache wallfacer binary
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.tool_cache }}/wallfacer/${{ inputs.version }}
+        key: wallfacer-${{ inputs.version }}-${{ steps.detect.outputs.triple }}
+
+    - name: Install wallfacer
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TRIPLE: ${{ steps.detect.outputs.triple }}
+        EXT: ${{ steps.detect.outputs.ext }}
+        BIN: ${{ steps.detect.outputs.bin }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TOOL_CACHE/wallfacer/$VERSION"
+        url="https://github.com/lacausecrypto/mcp-wallfacer/releases/download/$VERSION/wallfacer-$TRIPLE.$EXT"
+        echo "Downloading $url"
+        curl -fsSL -o "/tmp/wallfacer-$TRIPLE.$EXT" "$url"
+        cd "$RUNNER_TOOL_CACHE/wallfacer/$VERSION"
+        if [ "$EXT" = "zip" ]; then
+          unzip -o "/tmp/wallfacer-$TRIPLE.$EXT"
+        else
+          tar -xzf "/tmp/wallfacer-$TRIPLE.$EXT"
+        fi
+        chmod +x "$BIN" || true
+
+    - name: Add wallfacer to PATH
+      shell: bash
+      run: echo "$RUNNER_TOOL_CACHE/wallfacer/${{ inputs.version }}" >> "$GITHUB_PATH"
+
+    - name: Run wallfacer
+      id: run
+      shell: bash
+      env:
+        PACK: ${{ inputs.pack }}
+        PACK_ALL: ${{ inputs.pack-all }}
+        CONFIG: ${{ inputs.config }}
+        FORMAT: ${{ inputs.format }}
+        SEED: ${{ inputs.seed }}
+        CASES: ${{ inputs.cases }}
+        FAIL_ON_FINDING: ${{ inputs.fail-on-finding }}
+      run: |
+        set -euo pipefail
+        args=("--config" "$CONFIG")
+        if [ "$PACK_ALL" = "true" ]; then
+          args+=("--pack-all")
+        elif [ -n "$PACK" ]; then
+          # Newline-split for multi-pack composition.
+          while IFS= read -r p; do
+            [ -n "$p" ] && args+=("--pack" "$p")
+          done <<< "$PACK"
+        else
+          echo "::error::either `pack` or `pack-all: true` must be set"
+          exit 1
+        fi
+        args+=("--cases" "$CASES" "--format" "$FORMAT")
+        [ -n "$SEED" ] && args+=("--seed" "$SEED")
+
+        out_path=""
+        case "$FORMAT" in
+          json)  out_path="$RUNNER_TEMP/wallfacer-findings.json"  ;;
+          sarif) out_path="$RUNNER_TEMP/wallfacer-findings.sarif" ;;
+        esac
+
+        if [ -n "$out_path" ]; then
+          set +e
+          wallfacer property "${args[@]}" > "$out_path"
+          status=$?
+          set -e
+          case "$FORMAT" in
+            json)  echo "findings-json=$out_path"  >> "$GITHUB_OUTPUT" ;;
+            sarif) echo "findings-sarif=$out_path" >> "$GITHUB_OUTPUT" ;;
+          esac
+        else
+          set +e
+          wallfacer property "${args[@]}"
+          status=$?
+          set -e
+        fi
+
+        if [ "$status" -ne 0 ] && [ "$FAIL_ON_FINDING" = "true" ]; then
+          exit "$status"
+        fi

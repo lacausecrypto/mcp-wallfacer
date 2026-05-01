@@ -1,0 +1,38 @@
+{
+  "name": "mcp-wallfacer",
+  "version": "0.4.1",
+  "description": "Runtime fuzzing and invariant-testing harness for MCP servers — catch crashes, hangs, schema drift, and state leaks before they ship.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "fuzzing",
+    "testing",
+    "validation",
+    "security"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "author": "lacausecrypto",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lacausecrypto/mcp-wallfacer.git"
+  },
+  "homepage": "https://github.com/lacausecrypto/mcp-wallfacer#readme",
+  "bugs": {
+    "url": "https://github.com/lacausecrypto/mcp-wallfacer/issues"
+  },
+  "bin": {
+    "wallfacer": "bin/wallfacer.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "test": "node scripts/install.js && node bin/wallfacer.js --version"
+  },
+  "files": [
+    "bin/wallfacer.js",
+    "scripts/install.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

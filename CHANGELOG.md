@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.4.1 — 2026-05-01
+
+Phase N: **distribution + reach**. Same Rust binary, four new install
+paths so MCP authors who don't already have a Rust toolchain can run
+wallfacer without building from source.
+
+### Added
+
+* **npm wrapper** at [`npm/`](npm/). `npm install -g mcp-wallfacer`
+  drops a `wallfacer` shim on `$PATH`. The wrapper's `postinstall`
+  detects the host platform, downloads the matching tarball from the
+  GitHub release, and extracts the binary into the package's `bin/`
+  directory. `bin/wallfacer.js` is a tiny shim that forwards argv +
+  stdio to the binary and propagates its exit code.
+* **pip wrapper** at [`pip/`](pip/). `pip install mcp-wallfacer`
+  installs a pure-stdlib Python launcher. The first invocation
+  downloads the matching binary into a per-user cache
+  (`~/.cache/mcp-wallfacer` / `~/Library/Caches/mcp-wallfacer` /
+  `%LOCALAPPDATA%\mcp-wallfacer`) and execs it. Subsequent calls reuse
+  the cached binary.
+* **GitHub Action** at [`action.yml`](action.yml). Composite action
+  `uses: lacausecrypto/mcp-wallfacer@v0.4.1` that detects the runner
+  platform, caches the binary under `runner.tool_cache`, and forwards
+  inputs (`pack`, `pack-all`, `config`, `format`, `seed`, `cases`,
+  `fail-on-finding`) to `wallfacer property`. SARIF / JSON outputs are
+  exposed as action outputs for downstream `upload-sarif` /
+  artefact-upload steps.
+* [`docs/install.md`](docs/install.md) — operator-facing guide
+  covering all five install paths (cargo, GitHub release, npm, pip,
+  GitHub Action).
+* [`.github/workflows/action-smoke.yml`](.github/workflows/action-smoke.yml)
+  — CI smoke test that exercises the composite action against the
+  example python_server on Linux + macOS.
+
+### Notes
+
+* The wrappers do **not** pin a specific binary version — they default
+  to the matching `v<package version>` GitHub release, which means
+  `npm install mcp-wallfacer@0.4.1` always downloads `v0.4.1`. Pass
+  `WALLFACER_VERSION=v0.x.y` (npm + pip) or the action's `version`
+  input to override.
+* Neither wrapper requires a network connection at install time when
+  `WALLFACER_SKIP_INSTALL=1` (npm) or `WALLFACER_CACHE_DIR=<dir>`
+  pointing at a pre-populated cache (pip) — useful in container
+  builds that vendor the binary themselves.
+* The GitHub release v0.4.0 binaries are pulled by the wrappers, so
+  v0.4.1's npm / pip / Action default to v0.4.1 binaries that this
+  release also publishes.
+
 ## v0.4.0 — 2026-05-01
 
 Phase L: **sequence-aware property testing**. v0.3 covered every tool

@@ -1,0 +1,58 @@
+name: Action smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "action.yml"
+      - ".github/workflows/action-smoke.yml"
+  pull_request:
+    paths:
+      - "action.yml"
+      - ".github/workflows/action-smoke.yml"
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    name: Smoke test the composite action
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (test fixture)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Spawn the example python_server in the background
+        shell: bash
+        working-directory: examples/python_server
+        run: |
+          python3 -V
+          # The fixture is stdio; wallfacer spawns it itself via the
+          # `[target] command = python3 args = [server.py]` block.
+          # We only cd here to make the test path obvious.
+          ls -la
+
+      - name: Run wallfacer via the composite action
+        uses: ./
+        with:
+          version: v0.4.0
+          pack: |
+            error-shape
+            tool-annotations
+          config: examples/python_server/wallfacer.toml
+          format: json
+          fail-on-finding: false
+
+      - name: Inspect findings JSON
+        shell: bash
+        run: |
+          if [ -n "$WALLFACER_OUT" ] && [ -f "$WALLFACER_OUT" ]; then
+            echo "Findings JSON found at $WALLFACER_OUT"
+            jq '.findings | length' "$WALLFACER_OUT" || cat "$WALLFACER_OUT"
+          fi

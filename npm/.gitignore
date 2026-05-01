@@ -1,0 +1,5 @@
+# binaries downloaded by postinstall — not part of the published
+# package source, so don't commit them.
+bin/wallfacer
+bin/wallfacer.exe
+node_modules/

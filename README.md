@@ -27,11 +27,17 @@ A six-bug demo server is included at [`examples/python_server/`](examples/python
 
 ## Install
 
-Requires Rust 1.88 or newer. The original 1.83 target is not compatible with the current official `rmcp` SDK, which uses Rust features stabilized after 1.83.
+Five paths, one binary — pick whichever fits your toolchain. Full details in [docs/install.md](docs/install.md).
 
-```bash
-cargo install mcp-wallfacer
-```
+| Path | Command | Best for |
+|---|---|---|
+| **Cargo** | `cargo install mcp-wallfacer` | Rust toolchain already present (MSRV 1.88) |
+| **GitHub release** | [Download tarball](https://github.com/lacausecrypto/mcp-wallfacer/releases) | Air-gapped servers, no toolchain dep |
+| **npm** | `npm install -g mcp-wallfacer` | TypeScript / Node MCP authors |
+| **pip** | `pip install mcp-wallfacer` | Python MCP authors |
+| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.4.1` | CI gating with caching |
+
+The npm and pip wrappers are thin launchers that download the matching prebuilt binary from the GitHub release at install / first-run time; the underlying CLI is byte-identical to a `cargo install` build of the same version.
 
 The crates.io package is `mcp-wallfacer`; the installed binary is `wallfacer`.
 
