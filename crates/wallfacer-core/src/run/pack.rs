@@ -28,59 +28,60 @@ use crate::property::dsl::{parse_with_overrides, DslError, InvariantFile, MAX_EX
 ///
 /// The slice is `(name, raw YAML)`; lookup is by `name`. Adding a new
 /// embedded pack is a one-liner here plus a YAML file under
-/// `<workspace>/packs/<name>.yaml`.
+/// `crates/wallfacer-core/packs/<name>.yaml` (in-crate so the files
+/// ship in the published tarball).
 pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
-    ("auth", include_str!("../../../../packs/auth.yaml")),
+    ("auth", include_str!("../../packs/auth.yaml")),
     (
         "authorization",
-        include_str!("../../../../packs/authorization.yaml"),
+        include_str!("../../packs/authorization.yaml"),
     ),
     (
         "error-shape",
-        include_str!("../../../../packs/error-shape.yaml"),
+        include_str!("../../packs/error-shape.yaml"),
     ),
     (
         "idempotency",
-        include_str!("../../../../packs/idempotency.yaml"),
+        include_str!("../../packs/idempotency.yaml"),
     ),
     (
         "injection-shell",
-        include_str!("../../../../packs/injection-shell.yaml"),
+        include_str!("../../packs/injection-shell.yaml"),
     ),
     (
         "injection-sql",
-        include_str!("../../../../packs/injection-sql.yaml"),
+        include_str!("../../packs/injection-sql.yaml"),
     ),
     (
         "large-payload",
-        include_str!("../../../../packs/large-payload.yaml"),
+        include_str!("../../packs/large-payload.yaml"),
     ),
     (
         "pagination",
-        include_str!("../../../../packs/pagination.yaml"),
+        include_str!("../../packs/pagination.yaml"),
     ),
     (
         "path-traversal",
-        include_str!("../../../../packs/path-traversal.yaml"),
+        include_str!("../../packs/path-traversal.yaml"),
     ),
     (
         "prompt-injection",
-        include_str!("../../../../packs/prompt-injection.yaml"),
+        include_str!("../../packs/prompt-injection.yaml"),
     ),
     (
         "rate-limit",
-        include_str!("../../../../packs/rate-limit.yaml"),
+        include_str!("../../packs/rate-limit.yaml"),
     ),
     (
         "secrets-leakage",
-        include_str!("../../../../packs/secrets-leakage.yaml"),
+        include_str!("../../packs/secrets-leakage.yaml"),
     ),
-    ("security", include_str!("../../../../packs/security.yaml")),
+    ("security", include_str!("../../packs/security.yaml")),
     (
         "tool-annotations",
-        include_str!("../../../../packs/tool-annotations.yaml"),
+        include_str!("../../packs/tool-annotations.yaml"),
     ),
-    ("unicode", include_str!("../../../../packs/unicode.yaml")),
+    ("unicode", include_str!("../../packs/unicode.yaml")),
 ];
 
 /// Returns an iterator over the names of all embedded packs.

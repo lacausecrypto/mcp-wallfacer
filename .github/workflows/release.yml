@@ -22,7 +22,11 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: wallfacer-aarch64-unknown-linux-gnu.tar.gz
             binary: wallfacer
-          - os: macos-13
+          # Cross-compile x86_64-apple-darwin from the Apple silicon
+          # runner — macos-13 (Intel) free-tier runners are scarce and
+          # often queue for hours. macos-latest hosts have the SDK to
+          # build both targets.
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: wallfacer-x86_64-apple-darwin.tar.gz
             binary: wallfacer

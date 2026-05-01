@@ -9,11 +9,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use wallfacer_core::property::dsl::{parse, parse_with_overrides};
 
 fn packs_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace layout")
-        .join("packs")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs")
 }
 
 fn collect_packs() -> Vec<PathBuf> {

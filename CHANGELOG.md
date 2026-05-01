@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.3.1 — 2026-05-01
+
+Patch release fixing two release-pipeline bugs that surfaced while
+cutting v0.3.0. No behavioral changes to the wallfacer CLI itself.
+
+### Fixed
+
+* **Embedded packs missing from the published tarball.** The 15 v3
+  rule packs lived at `<workspace>/packs/` and were embedded via
+  `include_str!("../../../../packs/...")`, but `cargo publish` only
+  packages files that live inside the crate directory. The resulting
+  v0.3.0 tarball referenced YAML files that weren't included, so
+  `cargo install wallfacer-core@0.3.0` failed with `couldn't read
+  packs/<name>.yaml: No such file or directory`. Moved the packs to
+  `crates/wallfacer-core/packs/` so they ship with the crate.
+* **macOS Intel release builds queued indefinitely.** The
+  `release.yml` matrix used `macos-13` for `x86_64-apple-darwin`;
+  GitHub's free-tier macos-13 runner pool is small and often saturated
+  for hours (the v0.3.0 build sat queued for 1.5 h before being
+  cancelled). Both Apple targets now build on `macos-latest` (Apple
+  silicon hosts have the SDK to cross-compile to x86_64).
+
+### Note
+
+v0.3.0 was tagged and a GitHub release was published, but the crate
+was never uploaded to crates.io because of the packaging bug above.
+v0.3.1 is the first v0.3 release on crates.io.
+
 ## v0.3.0 — 2026-05-01
 
 A five-phase rewrite of the rule-pack subsystem. The CLI surface gains
