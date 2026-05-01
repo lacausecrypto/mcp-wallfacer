@@ -33,6 +33,17 @@ pub enum CorpusCommand {
     },
     Minimize {
         id: String,
+        /// Phase X (v0.7) — actually shrink the input by replaying
+        /// against the live target. Each delta-debug trial is one
+        /// `tools/call` round-trip; the smallest input that still
+        /// reproduces the original finding kind is written to disk
+        /// next to the original (`<id>.minimised.json`).
+        ///
+        /// Without this flag, `minimize` stays inspect-only
+        /// (prints the finding verbatim — same behaviour as
+        /// v0.6.x).
+        #[arg(long)]
+        replay: bool,
     },
 }
 
@@ -50,7 +61,9 @@ pub async fn run(args: CorpusArgs, config_path: Option<&Path>) -> Result<()> {
         CorpusCommand::List => list(&corpus),
         CorpusCommand::Show { id } => show(&corpus, &id),
         CorpusCommand::Replay { id, all } => replay(&corpus, config.as_ref(), id, all).await,
-        CorpusCommand::Minimize { id } => minimize(&corpus, &id),
+        CorpusCommand::Minimize { id, replay } => {
+            minimize(&corpus, config.as_ref(), &id, replay).await
+        }
     }
 }
 
@@ -150,17 +163,69 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
     }
 }
 
-fn minimize(corpus: &Corpus, id: &str) -> Result<()> {
-    // True input-shrinking is on the v0.4 roadmap. Until then, the
-    // command is a passive inspect-only operation that prints the
-    // finding so authors can hand-minimise. Surface a clear note rather
-    // than letting users assume an automatic shrink happened.
+async fn minimize(corpus: &Corpus, config: Option<&Config>, id: &str, replay: bool) -> Result<()> {
     let finding = corpus.find_by_id(id)?;
+
+    if !replay {
+        // Inspect-only mode (v0.6.x and earlier behaviour). Print
+        // the finding so authors can hand-shrink offline.
+        eprintln!(
+            "note: `corpus minimize` without --replay is inspect-only. Pass --replay to \
+             shrink the input by re-driving it against the configured target."
+        );
+        println!("{}", serde_json::to_string_pretty(&finding)?);
+        return Ok(());
+    }
+
+    // Phase X — live shrinking via `--replay`. Connect to the
+    // target, then iteratively shrink the input. Each shrink
+    // trial is one round-trip; the predicate compares the
+    // observed CallOutcome's kind against the original finding's
+    // kind class (Crash / Hang / ProtocolError vs PropertyFailure /
+    // SchemaViolation are kept apart).
+    let config = config.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--replay needs a wallfacer.toml; run from a directory with one or pass --config"
+        )
+    })?;
+    let target_kind = wallfacer_core::shrink::ShrinkTargetKind::from_finding_kind(&finding.kind);
+
+    let original = finding.repro.tool_call.clone();
+    let tool = finding.tool.clone();
+    let timeout = Duration::from_millis(config.target.timeout_ms);
+    let client = Client::connect(&config.target)
+        .await
+        .with_context(|| "failed to connect to MCP target for replay-based shrink")?;
+
     eprintln!(
-        "note: `corpus minimize` is currently inspect-only. Automatic input shrinking is \
-         tracked for v0.4. Printing the finding verbatim below so you can shrink manually."
+        "shrinking finding `{id}` (tool=`{tool}`, kind={:?}) — each trial is one tool call against the target",
+        target_kind
     );
-    println!("{}", serde_json::to_string_pretty(&finding)?);
+
+    let result = wallfacer_core::shrink::shrink_async(&original, |candidate| {
+        let client = client.clone();
+        let tool = tool.clone();
+        async move {
+            let outcome = client.call_tool(&tool, candidate, timeout).await;
+            target_kind.matches_outcome(&outcome)
+        }
+    })
+    .await;
+
+    client.shutdown().await.ok();
+
+    eprintln!(
+        "shrunk in {} step(s): {} bytes \u{2192} {} bytes ({:.0}% of original)",
+        result.steps,
+        result.byte_size.0,
+        result.byte_size.1,
+        if result.byte_size.0 == 0 {
+            0.0
+        } else {
+            (result.byte_size.1 as f64 / result.byte_size.0 as f64) * 100.0
+        }
+    );
+    println!("{}", serde_json::to_string_pretty(&result.minimised)?);
     Ok(())
 }
 

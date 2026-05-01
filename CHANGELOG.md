@@ -4,6 +4,110 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.7.0 — 2026-05-01
+
+Theme: **from bug-finding to fixing — wallfacer leaves the lab.**
+
+Four phases shipped, three of them code, the fourth a real-world
+campaign:
+
+### Added — Phase V: sequence corpus seeding
+
+* The v0.6 fuzz corpus and the sequence runner now share storage
+  and protocol. `wallfacer property --pack <sequence-pack>
+  --corpus-feedback` mutates each step's `with:` block from the
+  per-tool corpus 90 % of the time and saves any input that
+  triggered a sequence failure or produced a previously-unseen
+  response fingerprint.
+* Cross-pollination contract: a fuzz-discovered "interesting id"
+  on tool `T` can seed a sequence step that calls `T` on a later
+  run, and a sequence-failure input feeds back into the fuzz pool.
+* New CLI flags on `wallfacer property`: `--corpus-feedback`,
+  `--corpus-dir <path>`, `--mutate-ratio <0.0..=1.0>` (default
+  `0.9`).
+* `SequencePlan` gains `fuzz_corpus: Option<FuzzCorpus>` and
+  `mutate_ratio: f64` fields.
+
+### Added — Phase W: HTTP fault injection
+
+* New fixture
+  [`examples/python_server/server_http_faulty.py`](examples/python_server/server_http_faulty.py).
+  Pure-stdlib Python that injects production-flavoured faults into
+  a configurable subset of requests:
+  - `502` — bad gateway response
+  - `504` — gateway timeout response
+  - `fin-empty` — close the TCP connection before any HTTP
+    headers are written
+  - `fin-mid` — start a 200 response, write half the body, lie
+    about Content-Length, close
+  - `slow` — sleep past any reasonable client timeout
+* The fixture only faults `tools/call` requests — the handshake
+  (`initialize`, `notifications/initialized`) and tool discovery
+  (`tools/list`) are kept clean so the *transport* failure modes
+  can be exercised without preventing wallfacer from even
+  starting.
+* `wallfacer fuzz` and `wallfacer property` correctly classify
+  these faults as `ProtocolError` / `Hang` findings without
+  crashing the run. Three new e2e tests
+  (`http_fault_classification`) gate this against `502`,
+  `fin-mid`, `fin-empty` modes.
+
+### Added — Phase X: input shrinker
+
+* New `wallfacer_core::shrink` module with both a sync `shrink`
+  and an async `shrink_async`. Greedy delta-debug:
+  - Drop one object key at a time.
+  - Empty / halve string fields.
+  - Drop one array element at a time.
+  - Replace numeric / boolean leaves with `0` / `false`.
+  Loops to a fixed point or `MAX_STEPS = 256`.
+* `wallfacer corpus minimize <id> --replay` actually shrinks the
+  finding's input now. Each delta-debug trial is one
+  `tools/call` round-trip; the smallest input that still
+  reproduces the original finding kind is printed.
+* `ShrinkTargetKind` classifies a [`FindingKind`] into the bucket
+  the predicate accepts as "still firing": `Crash`, `Hang`,
+  `ProtocolError`, or the catch-all `AnyNonOk` for
+  PropertyFailure / SchemaViolation / SequenceFailure.
+* The default `wallfacer corpus minimize <id>` (no `--replay`)
+  stays inspect-only with a clearer hint pointing at the new
+  flag.
+
+### Added — Phase Y: real-world campaign
+
+* Ran the v0.6+ pack library against six popular OSS MCP
+  servers: `@modelcontextprotocol/{server-everything, server-memory,
+  server-sequential-thinking, server-filesystem}`,
+  `@upstash/context7-mcp`, and `mcp-belgium`.
+* Result: **0 confirmed bugs across ~150 tools**. The popular MCP
+  server library is well-engineered on the dimensions wallfacer
+  covers. The campaign methodology + clean-bill-of-health is
+  documented in [`docs/real-world-findings.md`](docs/real-world-findings.md);
+  the absence of findings is itself a useful, publishable signal.
+
+### Tests & quality
+
+* Five new e2e suites: `sequence_corpus_seeding`,
+  `http_fault_classification`, `corpus_minimize_shrinks`. Plus
+  `pack test --all` still 144/145 fixtures green.
+* `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace
+  --locked`, and `RUSTDOCFLAGS=-D warnings cargo doc --no-deps`
+  all clean.
+
+### Notes
+
+* Phase Y's "≥3 upstream issues filed" target was set against an
+  expectation that real-world findings would surface during the
+  campaign. They didn't — six servers tested clean. Honest result:
+  no upstream issues to file. The tracker now welcomes findings
+  from the next batch of OSS MCPs (community contributions
+  welcome).
+* `corpus minimize --replay` matches by `FindingKind` class only.
+  Per-invariant shrinking (re-evaluating the exact failing
+  invariant on each trial) is tracked for v0.8 — the current
+  bucket is wide enough for the Crash / Hang / ProtocolError
+  cases that dominate the corpus today.
+
 ## v0.6.0 — 2026-05-01
 
 Three new bug-finding capabilities — the v0.5 audit's "still

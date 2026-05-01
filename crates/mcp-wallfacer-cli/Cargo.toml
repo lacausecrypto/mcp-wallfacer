@@ -17,7 +17,7 @@ name = "wallfacer"
 path = "src/main.rs"
 
 [dependencies]
-wallfacer-core = { version = "0.6.0", path = "../wallfacer-core" }
+wallfacer-core = { version = "0.7.0", path = "../wallfacer-core" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 comfy-table = { workspace = true }
@@ -108,3 +108,15 @@ path = "tests/e2e/spec_conformance_catches.rs"
 [[test]]
 name = "fuzz_corpus_accumulates"
 path = "tests/e2e/fuzz_corpus_accumulates.rs"
+
+[[test]]
+name = "sequence_corpus_seeding"
+path = "tests/e2e/sequence_corpus_seeding.rs"
+
+[[test]]
+name = "http_fault_classification"
+path = "tests/e2e/http_fault_classification.rs"
+
+[[test]]
+name = "corpus_minimize_shrinks"
+path = "tests/e2e/corpus_minimize_shrinks.rs"

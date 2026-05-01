@@ -16,6 +16,7 @@ pub mod report;
 pub mod run;
 pub mod sarif;
 pub mod seed;
+pub mod shrink;
 pub mod suggest;
 pub mod target;
 

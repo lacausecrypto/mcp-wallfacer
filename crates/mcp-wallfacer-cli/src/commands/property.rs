@@ -47,6 +47,24 @@ pub struct PropertyArgs {
     pub cases: u32,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub format: OutputFormat,
+    /// Phase V — enable the persistent fuzz corpus for the
+    /// sequences in the loaded pack(s). Mirrors `wallfacer fuzz
+    /// --corpus-feedback`: shares the corpus directory so a
+    /// fuzz-discovered "interesting id" can seed a sequence's
+    /// `create_tool` step on the next run.
+    #[arg(long)]
+    pub corpus_feedback: bool,
+    /// Override the corpus directory (defaults to a sibling of
+    /// `[output] corpus_dir`). Only consulted when
+    /// `--corpus-feedback` is set.
+    #[arg(long)]
+    pub corpus_dir: Option<PathBuf>,
+    /// Phase V — fraction of sequence-step inputs that mutate
+    /// from the corpus instead of using the YAML literal.
+    /// Range `0.0..=1.0`. Default `0.9` matches AFL convention
+    /// and the v0.6 `fuzz` default.
+    #[arg(long, default_value_t = 0.9)]
+    pub mutate_ratio: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -111,12 +129,30 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
     let seq_report = if sequences.is_empty() {
         None
     } else {
+        // Phase V — corpus integration mirrors the fuzz CLI: the
+        // corpus dir defaults to a sibling of `[output] corpus_dir`
+        // so sequence and fuzz cross-pollinate without extra
+        // config.
+        let fuzz_corpus = if args.corpus_feedback {
+            let dir = args.corpus_dir.clone().unwrap_or_else(|| {
+                let findings_dir = PathBuf::from(&config.output.corpus_dir);
+                findings_dir
+                    .parent()
+                    .map(|p| p.join("fuzz_corpus"))
+                    .unwrap_or_else(|| PathBuf::from(".wallfacer/fuzz_corpus"))
+            });
+            Some(wallfacer_core::fuzz_corpus::FuzzCorpus::new(dir))
+        } else {
+            None
+        };
         let seq_plan = SequencePlan {
             sequences,
             master_seed,
             timeout: Duration::from_millis(config.target.timeout_ms),
             transport_name: config.target.transport_name().to_string(),
             severity: config.severity.clone(),
+            fuzz_corpus,
+            mutate_ratio: args.mutate_ratio,
         };
         let report = seq_plan
             .execute(&mut client, &corpus, reporter.as_mut())

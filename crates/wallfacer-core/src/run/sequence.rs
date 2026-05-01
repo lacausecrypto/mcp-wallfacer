@@ -37,6 +37,8 @@ use crate::{
     client::CallOutcome,
     corpus::Corpus,
     finding::{Finding, FindingKind, ReproInfo},
+    fuzz_corpus::{response_fingerprint, CorpusTrigger, FuzzCorpus, FuzzCorpusEntry},
+    mutate::corpus_mutator,
     property::{
         dsl::{FixtureExpect, Sequence, SequenceFixture, StepOutcome},
         jsonpath, runner,
@@ -84,6 +86,20 @@ pub struct SequencePlan {
     pub transport_name: String,
     /// `[severity]` overrides from `wallfacer.toml`.
     pub severity: SeverityConfig,
+    /// Phase V — optional persistent corpus, shared with the v0.6
+    /// fuzzer. When set, sequence steps mutate from the corpus
+    /// `mutate_ratio` fraction of the time and save inputs that
+    /// trigger findings or produce a previously-unseen response
+    /// fingerprint per step. Cross-pollinates with `wallfacer fuzz
+    /// --corpus-feedback`: fuzz-discovered "interesting ids" can
+    /// seed sequence steps that call the same tool.
+    pub fuzz_corpus: Option<crate::fuzz_corpus::FuzzCorpus>,
+    /// Phase V — fraction of sequence-step inputs that mutate from
+    /// the corpus instead of using the YAML literal verbatim.
+    /// Range `0.0..=1.0`. Default `0.9` matches the fuzz default.
+    /// Ignored when [`Self::fuzz_corpus`] is `None` or the per-tool
+    /// corpus is empty.
+    pub mutate_ratio: f64,
 }
 
 impl SequencePlan {
@@ -109,6 +125,27 @@ impl SequencePlan {
             live_tools.iter().map(|t| t.name.to_string()).collect();
 
         let mut report = SequenceReport::default();
+
+        // Phase V — preload the response-fingerprint set from
+        // every prior corpus entry across the tools this batch of
+        // sequences calls into. A novel fingerprint at run time is
+        // one not present in this set.
+        let mut seen_fingerprints: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        if let Some(corpus_ref) = self.fuzz_corpus.as_ref() {
+            let touched_tools: std::collections::BTreeSet<&str> = self
+                .sequences
+                .iter()
+                .flat_map(|s| s.steps.iter().map(|st| st.call.as_str()))
+                .collect();
+            for tool in touched_tools {
+                if let Ok(entries) = corpus_ref.list(tool) {
+                    for e in entries {
+                        seen_fingerprints.insert(e.fingerprint);
+                    }
+                }
+            }
+        }
 
         for sequence in &self.sequences {
             // Pre-flight: refuse to run a sequence that references a
@@ -138,7 +175,16 @@ impl SequencePlan {
             let seed = derive_seed(self.master_seed, &sequence.name, 0);
             let mut rng = ChaCha20Rng::from_seed(canonical);
 
-            let outcome = run_one_sequence(client, sequence, &mut rng, self.timeout).await;
+            let outcome = run_one_sequence(
+                client,
+                sequence,
+                &mut rng,
+                self.timeout,
+                self.fuzz_corpus.as_ref(),
+                self.mutate_ratio,
+                &mut seen_fingerprints,
+            )
+            .await;
             match outcome {
                 SequenceOutcome::Pass => {
                     report.passed.push(sequence.name.clone());
@@ -193,11 +239,20 @@ enum SequenceOutcome {
 
 /// Executes one [`Sequence`]. Stops at the first failing step and
 /// returns the offending step's index plus a free-form detail string.
+///
+/// Phase V — when `corpus` is `Some`, the runner mutates each
+/// step's `with:` block from the per-tool corpus
+/// `mutate_ratio` fraction of the time and saves any input that
+/// triggered a finding *or* produced a previously-unseen response
+/// fingerprint.
 async fn run_one_sequence<C: McpExec + ?Sized>(
     client: &mut C,
     sequence: &Sequence,
     rng: &mut ChaCha20Rng,
     timeout: Duration,
+    corpus: Option<&FuzzCorpus>,
+    mutate_ratio: f64,
+    seen_fingerprints: &mut std::collections::BTreeSet<String>,
 ) -> SequenceOutcome {
     let mut context = SequenceContext::new();
 
@@ -211,7 +266,7 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             .clone()
             .map(|map| Value::Object(map.into_iter().collect::<Map<_, _>>()))
             .unwrap_or(Value::Object(Map::new()));
-        let input = match context.substitute(&raw_input) {
+        let substituted = match context.substitute(&raw_input) {
             Ok(value) => value,
             Err(err) => {
                 return SequenceOutcome::Fail {
@@ -226,13 +281,69 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             }
         };
 
+        // Phase V — 90/10 mutate-vs-literal split. We mutate the
+        // *substituted* input so step-references already point at
+        // real bound values; mutation rolls dice on top, the
+        // bindings stay coherent. When the corpus has no entry
+        // for this step's tool, fall back to the literal input.
+        use rand::Rng;
+        let prior: Vec<FuzzCorpusEntry> = corpus
+            .map(|c| c.list(&step.call).unwrap_or_default())
+            .unwrap_or_default();
+        let input = if !prior.is_empty() && rng.gen_bool(mutate_ratio.clamp(0.0, 1.0)) {
+            // Pick a random corpus entry, mutate it. The seed
+            // input is whatever the past run found interesting;
+            // current substituted input is ignored on this path
+            // — by design, that's how we explore beyond the
+            // hand-written YAML.
+            let pick = &prior[rng.gen_range(0..prior.len())];
+            corpus_mutator::mutate(&pick.input, rng)
+        } else {
+            substituted.clone()
+        };
+
         let response = invoke(client, &step.call, input.clone(), timeout, rng).await;
+
+        // Phase V — fingerprint the response BEFORE we destructure
+        // it for outcome / assertion checks below. Save the input
+        // when the fingerprint is novel.
+        let fingerprint = response_fingerprint(&response);
+        if let Some(corpus_ref) = corpus {
+            if seen_fingerprints.insert(fingerprint.clone()) {
+                let _ = corpus_ref.save(&FuzzCorpusEntry {
+                    tool: step.call.clone(),
+                    input: input.clone(),
+                    trigger: CorpusTrigger::NewFingerprint,
+                    fingerprint: fingerprint.clone(),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+        }
+
+        // Phase V — helper that saves the failing step's input
+        // under the strongest signal (`Finding`). Overrides any
+        // earlier `NewFingerprint` save for the same input via the
+        // corpus's input-key dedup.
+        let save_finding = |corpus_ref: &FuzzCorpus, fingerprint: &str, input: &Value| {
+            let _ = corpus_ref.save(&FuzzCorpusEntry {
+                tool: step.call.clone(),
+                input: input.clone(),
+                trigger: CorpusTrigger::Finding {
+                    kind: "sequence_failure".to_string(),
+                },
+                fingerprint: fingerprint.to_string(),
+                timestamp: chrono::Utc::now(),
+            });
+        };
 
         // Outcome class check (Ok / Error). Only matters when `expect`
         // is set: with the default the runner falls through to the
         // assertion list.
         let expected = step.expect.unwrap_or_default();
         if let Some(detail) = check_step_outcome(&response, expected) {
+            if let Some(c) = corpus {
+                save_finding(c, &fingerprint, &input);
+            }
             return SequenceOutcome::Fail {
                 step_index,
                 step_call: step.call.clone(),
@@ -254,6 +365,9 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             if let Err(err) =
                 runner::evaluate_step_assertions(&step.assertions, input.clone(), response.clone())
             {
+                if let Some(c) = corpus {
+                    save_finding(c, &fingerprint, &input);
+                }
                 return SequenceOutcome::Fail {
                     step_index,
                     step_call: step.call.clone(),
