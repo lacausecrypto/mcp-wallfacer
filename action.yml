@@ -1,4 +1,4 @@
-name: "wallfacer"
+name: "mcp-wallfacer"
 description: "Run mcp-wallfacer rule packs against an MCP server in CI."
 author: "lacausecrypto"
 branding:
