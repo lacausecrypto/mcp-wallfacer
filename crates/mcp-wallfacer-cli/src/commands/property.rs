@@ -13,7 +13,7 @@ use wallfacer_core::{
     property::dsl::InvariantFile,
     run::{
         embedded_pack_names, resolve_pack, DestructiveDetector, EmbeddedLoader, LayeredLoader,
-        PackLoader, PropertyPlan, Reporter,
+        PackLoader, PropertyPlan, Reporter, SequencePlan,
     },
     target::Config,
 };
@@ -73,15 +73,26 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
         .await
         .context("failed to connect to MCP target")?;
 
+    let master_seed = args.seed.unwrap_or_else(rand::random);
+    // Split sequences out: PropertyPlan iterates invariants +
+    // for_each_tool, SequencePlan iterates sequences. Both run on the
+    // same corpus + reporter pair so findings stream into one place.
+    let mut file = composition.file;
+    let sequences = std::mem::take(&mut file.sequences);
+
     let plan = PropertyPlan {
-        file: composition.file,
+        file,
         default_cases: args.cases,
-        master_seed: args.seed.unwrap_or_else(rand::random),
+        master_seed,
         timeout: Duration::from_millis(config.target.timeout_ms),
         transport_name: config.target.transport_name().to_string(),
         detector: DestructiveDetector::from_config(&config.destructive, &config.allow_destructive)
             .context("invalid destructive / allowlist regex in config")?,
         severity: config.severity.clone(),
+        // Defer the reporter's `on_run_end` so any subsequent
+        // sequence sub-run can stream its findings into the same
+        // table before it gets printed.
+        defer_run_end: !sequences.is_empty(),
     };
 
     let mut reporter: Box<dyn Reporter> = match args.format {
@@ -90,12 +101,36 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
         }
         OutputFormat::Json => Box::new(JsonReporter::new()),
     };
-    let report = plan
+    let prop_report = plan
         .execute(&mut client, &corpus, reporter.as_mut())
         .await?;
+
+    // Sequences run on the same client (preserving any state the
+    // single-tool invariants left behind) and accumulate into the
+    // same reporter, so findings stream into a single output stream.
+    let seq_report = if sequences.is_empty() {
+        None
+    } else {
+        let seq_plan = SequencePlan {
+            sequences,
+            master_seed,
+            timeout: Duration::from_millis(config.target.timeout_ms),
+            transport_name: config.target.transport_name().to_string(),
+            severity: config.severity.clone(),
+        };
+        let report = seq_plan
+            .execute(&mut client, &corpus, reporter.as_mut())
+            .await?;
+        // Now that both sub-runs are done, flush the table.
+        reporter.on_run_end();
+        Some(report)
+    };
+
     client.shutdown().await.ok();
 
-    if report.findings_count == 0 {
+    let total_findings =
+        prop_report.findings_count + seq_report.as_ref().map(|r| r.findings_count).unwrap_or(0);
+    if total_findings == 0 {
         Ok(())
     } else {
         std::process::exit(1);
@@ -172,9 +207,11 @@ fn compose_invariants(
         metadata: None,
         invariants: Vec::new(),
         for_each_tool: Vec::new(),
+        sequences: Vec::new(),
     };
     let mut seen_invariants: BTreeSet<String> = BTreeSet::new();
     let mut seen_for_each: BTreeSet<String> = BTreeSet::new();
+    let mut seen_sequences: BTreeSet<String> = BTreeSet::new();
     let mut invariant_to_pack: BTreeMap<String, String> = BTreeMap::new();
 
     for pack_name in &pack_names {
@@ -201,6 +238,14 @@ fn compose_invariants(
             // duplicates by construction).
             if seen_for_each.insert(block.name.clone()) {
                 combined.for_each_tool.push(block);
+            }
+        }
+        for sequence in file.sequences {
+            // Sequences are deduped by canonical sequence name; first
+            // pack wins, same as invariants.
+            if seen_sequences.insert(sequence.name.clone()) {
+                invariant_to_pack.insert(sequence.name.clone(), pack_name.clone());
+                combined.sequences.push(sequence);
             }
         }
     }

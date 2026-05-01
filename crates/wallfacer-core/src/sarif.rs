@@ -66,6 +66,7 @@ fn rule_id(kind: &FindingKind) -> &'static str {
         FindingKind::PropertyFailure { .. } => "property_failure",
         FindingKind::ProtocolError => "protocol_error",
         FindingKind::StateLeak => "state_leak",
+        FindingKind::SequenceFailure { .. } => "sequence_failure",
     }
 }
 

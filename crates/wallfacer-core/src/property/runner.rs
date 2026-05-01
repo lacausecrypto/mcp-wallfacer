@@ -76,11 +76,24 @@ pub fn input_for_case(invariant: &Invariant, case_index: u32, rng: &mut impl Rng
 /// Top-level entry point: evaluates every assertion of an invariant against
 /// a freshly built `{input, response}` context.
 pub fn evaluate(invariant: &Invariant, input: Value, response: Value) -> Result<()> {
+    evaluate_step_assertions(&invariant.assertions, input, response)
+}
+
+/// Evaluates a free-form list of assertions against a fresh
+/// `{input, response}` context. Used by the sequence runner where
+/// the assertions live on a [`super::dsl::SequenceStep`] rather than
+/// an [`Invariant`]. Behaviour is otherwise identical to
+/// [`evaluate`].
+pub fn evaluate_step_assertions(
+    assertions: &[Assertion],
+    input: Value,
+    response: Value,
+) -> Result<()> {
     let context = json!({
         "input": input,
         "response": response,
     });
-    for assertion in &invariant.assertions {
+    for assertion in assertions {
         evaluate_assertion(assertion, &context)?;
     }
     Ok(())

@@ -4,6 +4,87 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.4.0 — 2026-05-01
+
+Phase L: **sequence-aware property testing**. v0.3 covered every tool
+in isolation; v0.4 ships a multi-step DSL so wallfacer can express
+invariants that depend on the *interaction* of several tools — which
+is where most real-world MCP bugs hide (state leaks, session
+fixation, broken pagination cursors). The wire format and CLI surface
+are backwards-compatible: every v0.3 pack keeps parsing and running
+unchanged.
+
+### Highlights
+
+* **`sequences:` block in the property DSL.** A sequence is a chain
+  of `SequenceStep`s sharing a single MCP client. Steps can `bind`
+  their `{input, response}` envelope under a name, and later steps
+  reference it via `{{steps.<bind>.<jsonpath>}}` placeholders inside
+  their `with:` arguments. Substitution is late-bound: a step's
+  inputs can depend on the *response* of a previous step.
+* **Two new embedded packs:** `stateful` (create/read/delete
+  state-leak detection) and `auth-flow` (login/logout token
+  revocation). Total embedded packs goes from 15 to 17.
+* **`FindingKind::SequenceFailure { sequence, step_index, step_call }`**
+  for the new finding class. Severity defaults to `High`. SARIF
+  output, the JSON envelope, and the corpus writer all handle the
+  new kind.
+* **`apply.input: schema_valid`** (added in v0.3.3, now used by
+  every `for_each_tool` template that doesn't supply its own
+  `fixed:` block) — the runner pulls the per-case input from the
+  live tool's `inputSchema` using `mutate::generate_payload(GenMode::Conform)`.
+* **`docs/sequences.md`** walks the YAML shape, the substitution
+  rules, the reconnect policy, and the two shipped packs.
+
+### Added
+
+* `wallfacer_core::property::dsl::{Sequence, SequenceStep, StepOutcome,
+  SequenceFixture}` — public types backing the new DSL block.
+* `wallfacer_core::run::sequence::{SequencePlan, SequenceReport,
+  SkippedSequence, SequenceContext, evaluate_sequence_fixture,
+  SequenceFixtureOutcome}` — runner + fixture-evaluator.
+* `wallfacer_core::property::runner::evaluate_step_assertions(&[Assertion],
+  input, response)` — extracted helper used by the sequence runner;
+  the existing `evaluate(invariant, input, response)` now delegates
+  to it.
+* `PropertyPlan::defer_run_end` flag for chaining a property and a
+  sequence sub-run through a single reporter without splitting the
+  output stream. Default `false`; the CLI sets it to `true` when
+  the loaded pack has both invariants and sequences.
+* Embedded packs: `stateful.yaml`, `auth-flow.yaml` plus
+  `EMBEDDED_PACKS` updated.
+* `docs/sequences.md` — operator-facing reference.
+
+### Changed
+
+* `for_each_tool[*].apply` accepts an optional `input: schema_valid`
+  field. When set, overrides `fixed`/`generate` and the runner
+  derives the per-case input from the tool's declared schema.
+* `tool-annotations` pack rewritten in v0.3.3 stays as is (envelope
+  shape + open-world path leak); the redundant invariants on
+  `read_only` / `idempotent` are gone.
+
+### Reconnect semantics for sequences
+
+Single-tool invariants reconnect aggressively after every transport
+hang, protocol error, or assertion failure. Sequences depend on
+per-connection state (auth tokens, in-memory bookkeeping, session
+ids), so the sequence runner does **not** reconnect between steps —
+a failing step marks the sequence failed, the rest of the steps are
+skipped, but the client survives so subsequent sequences observe
+whatever state the broken step left behind. See `docs/sequences.md`
+for the full policy.
+
+### Tests & quality
+
+* New e2e test `sequence_catches_state_leak`: the `stateful` pack
+  catches the leaky-`record_delete` bug planted in
+  `examples/python_server`. `pack test --all` covers the four new
+  sequence fixtures (2 in `stateful`, 2 in `auth-flow`).
+* `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace
+  --locked`, `RUSTDOCFLAGS=-D warnings cargo doc --workspace
+  --no-deps` all clean.
+
 ## v0.3.3 — 2026-05-01
 
 Patch driven by a real-world test campaign against seven public MCP

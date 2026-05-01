@@ -58,16 +58,20 @@ fn pack_all_produces_diverse_findings_without_duplicates() {
         findings.len()
     );
 
-    // Dedup check: every invariant name must appear exactly once.
+    // Dedup check: every finding name must appear exactly once.
+    // A finding's "name" is its `kind.invariant` (PropertyFailure) or
+    // `kind.sequence` (SequenceFailure, Phase L).
     let mut names: BTreeSet<String> = BTreeSet::new();
     for finding in findings {
-        let inv = finding["kind"]["invariant"]
+        let kind_obj = &finding["kind"];
+        let inv = kind_obj["invariant"]
             .as_str()
-            .expect("PropertyFailure carries invariant name")
+            .or_else(|| kind_obj["sequence"].as_str())
+            .expect("finding kind carries invariant or sequence name")
             .to_string();
         assert!(
             names.insert(inv.clone()),
-            "duplicate finding for invariant `{inv}` (Phase J: dedup must drop later occurrences)"
+            "duplicate finding `{inv}` (Phase J: dedup must drop later occurrences)"
         );
     }
 
@@ -103,9 +107,11 @@ fn security_meta_pack_loads_seven_packs_without_duplicates() {
     );
     let mut names: BTreeSet<String> = BTreeSet::new();
     for finding in findings {
-        let inv = finding["kind"]["invariant"]
+        let kind_obj = &finding["kind"];
+        let inv = kind_obj["invariant"]
             .as_str()
-            .expect("PropertyFailure")
+            .or_else(|| kind_obj["sequence"].as_str())
+            .expect("finding kind carries invariant or sequence name")
             .to_string();
         assert!(
             names.insert(inv.clone()),

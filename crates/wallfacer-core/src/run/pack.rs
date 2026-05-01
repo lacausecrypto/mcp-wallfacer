@@ -32,6 +32,7 @@ use crate::property::dsl::{parse_with_overrides, DslError, InvariantFile, MAX_EX
 /// ship in the published tarball).
 pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
     ("auth", include_str!("../../packs/auth.yaml")),
+    ("auth-flow", include_str!("../../packs/auth-flow.yaml")),
     (
         "authorization",
         include_str!("../../packs/authorization.yaml"),
@@ -65,6 +66,7 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         include_str!("../../packs/secrets-leakage.yaml"),
     ),
     ("security", include_str!("../../packs/security.yaml")),
+    ("stateful", include_str!("../../packs/stateful.yaml")),
     (
         "tool-annotations",
         include_str!("../../packs/tool-annotations.yaml"),

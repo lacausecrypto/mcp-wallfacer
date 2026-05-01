@@ -19,11 +19,26 @@ pub struct Finding {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FindingKind {
     Crash,
-    Hang { ms: u64 },
+    Hang {
+        ms: u64,
+    },
     SchemaViolation,
-    PropertyFailure { invariant: String },
+    PropertyFailure {
+        invariant: String,
+    },
     ProtocolError,
     StateLeak,
+    /// Phase L — a multi-step [`crate::property::dsl::Sequence`]
+    /// failed at step `step_index`. Carries enough metadata to point a
+    /// human at which step of which sequence broke.
+    SequenceFailure {
+        /// Sequence name as declared in YAML.
+        sequence: String,
+        /// Zero-based index of the offending step within the sequence.
+        step_index: usize,
+        /// Tool the offending step called.
+        step_call: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -82,6 +97,7 @@ impl FindingKind {
             FindingKind::SchemaViolation => Severity::Medium,
             FindingKind::PropertyFailure { .. } => Severity::Medium,
             FindingKind::StateLeak => Severity::High,
+            FindingKind::SequenceFailure { .. } => Severity::High,
         }
     }
 
@@ -95,6 +111,7 @@ impl FindingKind {
             FindingKind::SchemaViolation => "schema_violation",
             FindingKind::PropertyFailure { .. } => "property_failure",
             FindingKind::StateLeak => "state_leak",
+            FindingKind::SequenceFailure { .. } => "sequence_failure",
         }
     }
 }

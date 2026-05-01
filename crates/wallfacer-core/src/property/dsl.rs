@@ -88,6 +88,108 @@ pub struct InvariantFile {
     /// Default empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub for_each_tool: Vec<ForEachToolBlock>,
+    /// Phase L — multi-step sequences. Each [`Sequence`] runs a chain of
+    /// tool calls against a single shared client, with later steps able
+    /// to reference earlier steps' inputs and responses via
+    /// `{{steps.<bind>.<jsonpath>}}` substitutions. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<Sequence>,
+}
+
+/// Phase L — multi-step invariant. The runner executes [`Self::steps`]
+/// in order on a single `Client`, threading each step's
+/// `{input, response}` envelope through a shared context that later
+/// steps can reference via `{{steps.<bind>.<jsonpath>}}` placeholders
+/// inside their `with:` arguments and assertion paths.
+///
+/// A sequence fails as soon as any step's `expect`/`assert` is
+/// violated, producing a [`crate::finding::FindingKind::SequenceFailure`]
+/// finding tagged with the offending step index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sequence {
+    /// Canonical sequence name. Used as the finding identifier and as
+    /// the corpus folder name; sanitised by the corpus writer like any
+    /// tool name.
+    pub name: String,
+    /// Optional human-readable description; surfaced by `wallfacer pack
+    /// show` and the human reporter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Ordered list of steps. Must be non-empty.
+    pub steps: Vec<SequenceStep>,
+    /// Synthetic step-by-step fixtures for `wallfacer pack test`. Each
+    /// fixture supplies one canned response per step plus the expected
+    /// final outcome. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_fixtures: Vec<SequenceFixture>,
+}
+
+/// One step inside a [`Sequence`]. Steps share a `Client` — no
+/// reconnect happens between adjacent steps unless the runner
+/// explicitly calls one — so authentication tokens, session ids, and
+/// any other per-connection state survives across the chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceStep {
+    /// Tool name to invoke. Like single-tool invariants, the runner
+    /// skips the whole sequence (and the rest of its steps) if the tool
+    /// isn't advertised by the server.
+    pub call: String,
+    /// Input arguments. May contain `{{steps.<name>.<jsonpath>}}`
+    /// placeholders resolved at step-execution time against the
+    /// already-bound steps' `{input, response}` envelopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with: Option<BTreeMap<String, Value>>,
+    /// Optional binding name. When set, the step's
+    /// `{input, response}` envelope is stored under this key in the
+    /// shared context. The default of `None` means later steps can't
+    /// reference this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
+    /// Expected outcome class. Defaults to [`StepOutcome::Ok`].
+    /// `Error` lets the sequence assert the step *should* fail (e.g.
+    /// post-logout, the protected resource must reject the call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<StepOutcome>,
+    /// Per-step assertions. Evaluated against the same
+    /// `{input, response}` context the [`Invariant`] runner uses, so
+    /// the existing assertion vocabulary applies unchanged.
+    #[serde(default, rename = "assert", skip_serializing_if = "Vec::is_empty")]
+    pub assertions: Vec<Assertion>,
+}
+
+/// Coarse outcome class for a [`SequenceStep`]. Distinguishes the
+/// happy-path "tool returned cleanly" from the negative-test
+/// "tool was *expected* to error" (e.g. post-logout request).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutcome {
+    /// Step must produce a non-error response (`isError` not `true`)
+    /// AND the call must not crash / hang. Default.
+    #[default]
+    Ok,
+    /// Step must return `isError: true` OR the response envelope must
+    /// indicate a clean failure. Useful for asserting that the server
+    /// rejects an action — e.g. reading a deleted record.
+    Error,
+}
+
+/// Synthetic fixture for `wallfacer pack test`. The fixture supplies
+/// one canned response per step (in the same order as
+/// [`Sequence::steps`]) plus the expected final outcome of the entire
+/// sequence. Step assertions are evaluated against the canned
+/// responses so the pack author can gate CI without a live MCP target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceFixture {
+    /// Fixture name (free-form, used in test reports).
+    pub name: String,
+    /// One synthetic response per [`Sequence::steps`] entry, in the
+    /// same order. Length mismatches surface as a
+    /// [`crate::property::runner::FixtureOutcome::Structural`]
+    /// failure.
+    pub responses: Vec<Value>,
+    /// Whether the sequence as a whole should pass or fail when run
+    /// against `responses`.
+    pub expect: FixtureExpect,
 }
 
 /// Phase I — `for_each_tool` directive: a tool-name-agnostic template

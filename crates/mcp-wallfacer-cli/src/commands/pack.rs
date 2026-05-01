@@ -22,7 +22,10 @@ use wallfacer_core::{
         dsl::{parse_with_overrides, synthesize_for_test, FixtureExpect, InvariantFile},
         runner::{evaluate_fixture, FixtureOutcome},
     },
-    run::{embedded_pack_names, embedded_pack_source},
+    run::{
+        embedded_pack_names, embedded_pack_source, evaluate_sequence_fixture,
+        SequenceFixtureOutcome,
+    },
     target::Config,
 };
 
@@ -350,6 +353,38 @@ fn run_pack_fixtures(
             }
         };
         total += run_invariant_fixtures(pack_name, &synth, matched, failures);
+    }
+    // Phase L — every sequence's `test_fixtures` is evaluated against
+    // its parent sequence using the canned per-step responses. The
+    // failure reporter uses the sequence name in the "Invariant"
+    // column so authors see which sequence broke.
+    for sequence in &file.sequences {
+        for fixture in &sequence.test_fixtures {
+            total += 1;
+            match evaluate_sequence_fixture(sequence, fixture) {
+                SequenceFixtureOutcome::Match => *matched += 1,
+                SequenceFixtureOutcome::Mismatch {
+                    expected,
+                    observed,
+                    detail,
+                } => failures.push(TestFailure {
+                    pack: pack_name.to_string(),
+                    invariant: sequence.name.clone(),
+                    fixture: fixture.name.clone(),
+                    expected,
+                    observed: Some(observed),
+                    detail,
+                }),
+                SequenceFixtureOutcome::Structural { error } => failures.push(TestFailure {
+                    pack: pack_name.to_string(),
+                    invariant: sequence.name.clone(),
+                    fixture: fixture.name.clone(),
+                    expected: fixture.expect,
+                    observed: None,
+                    detail: format!("(structural error) {error}"),
+                }),
+            }
+        }
     }
     total
 }

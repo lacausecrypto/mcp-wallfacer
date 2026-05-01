@@ -25,6 +25,7 @@ pub mod glob;
 pub mod pack;
 pub mod property;
 pub mod reporter;
+pub mod sequence;
 pub mod torture;
 
 pub use destructive::{DestructiveDetector, ToolClassification};
@@ -37,4 +38,8 @@ pub use pack::{
 };
 pub use property::{parse_invariants, MissingTool, PropertyPlan, PropertyReport};
 pub use reporter::{NoopReporter, Reporter, RunInfo};
+pub use sequence::{
+    evaluate_sequence_fixture, SequenceFixtureOutcome, SequencePlan, SequenceReport,
+    SkippedSequence,
+};
 pub use torture::{parse_duration, TortureMode, TortureReport, TortureRun};

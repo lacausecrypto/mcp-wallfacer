@@ -7,11 +7,12 @@ timeout_ms = 2000
 [output]
 corpus_dir = ".wallfacer/corpus"
 
-# `crashes_now` keyword would be classified destructive by the default
-# detector. We allow it explicitly so the example exercises crash
-# detection rather than being filtered out before fuzzing.
+# `crashes_now` and `record_delete` would be classified destructive by
+# the default detector (keyword + annotation respectively). We allow
+# them explicitly so the example exercises crash detection (the fuzz
+# command) and the state-leak sequence (the stateful pack).
 [allow_destructive]
-tools = ["^crashes_now$"]
+tools = ["^crashes_now$", "^record_delete$"]
 
 # ---- Phase I — pack overrides ----
 # Point each pack at the witness tool that exists in this fixture.
@@ -44,3 +45,10 @@ shell_field = "command"
 [packs.path-traversal]
 read_file_tool = "read_file"
 write_file_tool = "read_file"
+
+# Phase L — point the stateful pack at the record_create / delete /
+# read trio that demonstrates the leaky-delete bug.
+[packs.stateful]
+create_tool = "record_create"
+delete_tool = "record_delete"
+read_tool = "record_read"

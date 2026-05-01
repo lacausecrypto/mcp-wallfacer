@@ -18,6 +18,13 @@ from typing import Any, Dict, List
 
 
 SESSIONS: Dict[str, Any] = {}
+# Phase L state-leak demo: a record store that logs deletions but
+# never actually evicts. The bug — `record_delete` returns ok yet
+# `record_read` still finds the record afterwards — is exactly what
+# the `stateful` rule pack is built to catch.
+RECORDS: Dict[int, Dict[str, Any]] = {}
+NEXT_RECORD_ID: int = 0
+DELETED_RECORD_IDS: List[int] = []
 WRITE_LOCK = asyncio.Lock()
 
 
@@ -136,6 +143,33 @@ TOOLS = [
             "idempotentHint": True,
         },
     },
+    # ---- Phase L — sequence/state-leak bugs the `stateful` pack catches ----
+    # `record_create` returns ok and stores the row.
+    {
+        "name": "record_create",
+        "description": "Create a record; returns its id under structuredContent.id.",
+        "inputSchema": object_schema({"event": {"type": "string"}}, []),
+    },
+    # `record_delete` LIES: returns ok but never removes the row, so a
+    # subsequent `record_read` still sees the data. This is the
+    # canonical state-leak the `stateful` pack is supposed to catch.
+    {
+        "name": "record_delete",
+        "description": "BUG: claims to delete but only logs the request; record stays.",
+        "inputSchema": object_schema({"id": {"type": "integer"}}),
+        "annotations": {
+            "destructiveHint": True,
+        },
+    },
+    # `record_read` returns the row by id, isError=true if not found.
+    {
+        "name": "record_read",
+        "description": "Read a record by id; returns isError=true if not present.",
+        "inputSchema": object_schema({"id": {"type": "integer"}}),
+        "annotations": {
+            "readOnlyHint": True,
+        },
+    },
 ]
 
 
@@ -231,6 +265,30 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "list_active_users":
         # idempotentHint=true but envelope omits isError + structuredContent.
         return {"content": [{"type": "text", "text": "alice, bob"}]}
+    # ---- Phase L state-leak demo ----
+    if name == "record_create":
+        global NEXT_RECORD_ID
+        NEXT_RECORD_ID += 1
+        rec_id = NEXT_RECORD_ID
+        RECORDS[rec_id] = {"id": rec_id, "event": str(args.get("event", ""))}
+        return structured_result({"id": rec_id})
+    if name == "record_delete":
+        # BUG: pretend to delete, actually leak the record.
+        try:
+            req_id = int(args.get("id"))
+        except (TypeError, ValueError):
+            return text_result("invalid id", is_error=True)
+        DELETED_RECORD_IDS.append(req_id)
+        return text_result(f"queued deletion of {req_id}")
+    if name == "record_read":
+        try:
+            req_id = int(args.get("id"))
+        except (TypeError, ValueError):
+            return text_result("invalid id", is_error=True)
+        record = RECORDS.get(req_id)
+        if record is None:
+            return text_result(f"record {req_id} not found", is_error=True)
+        return structured_result(record)
     return text_result(f"unknown tool: {name}", is_error=True)
 
 

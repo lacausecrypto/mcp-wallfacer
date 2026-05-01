@@ -77,6 +77,13 @@ pub struct PropertyPlan {
     pub detector: DestructiveDetector,
     /// `[severity]` overrides from `wallfacer.toml`.
     pub severity: SeverityConfig,
+    /// When `true`, suppress the trailing `reporter.on_run_end()` so
+    /// the caller can chain another sub-run (typically a
+    /// [`super::SequencePlan`]) into the same reporter without
+    /// flushing the findings table early. Defaults to `false` —
+    /// stand-alone property runs keep their existing lifecycle.
+    #[doc(hidden)]
+    pub defer_run_end: bool,
 }
 
 impl PropertyPlan {
@@ -157,7 +164,6 @@ impl PropertyPlan {
             blocked: blocked.clone(),
             master_seed: Some(self.master_seed),
         });
-
         // Surface every skipped invariant to the reporter so JSON
         // consumers see them under `skipped` and the human reporter
         // prints a "Skipped tool" row.
@@ -236,7 +242,9 @@ impl PropertyPlan {
             }
         }
 
-        reporter.on_run_end();
+        if !self.defer_run_end {
+            reporter.on_run_end();
+        }
         Ok(report)
     }
 }
