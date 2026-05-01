@@ -4,6 +4,32 @@ Confirmed bugs surfaced by wallfacer rule packs against external MCP
 servers. Each row links to the upstream issue (or the security
 advisory once disclosed).
 
+## v0.8 campaign — scaling to large servers
+
+v0.8 adds three operator-facing levers that unblock the next batch:
+
+- `--max-tools N` (`property` and `fuzz`): caps `for_each_tool`
+  expansion before the loop starts, so a 319-tool MCP doesn't
+  fan a 5-invariant pack out to 1.5k invocations. Use `5..20`
+  on first pass to scout, lift later for full coverage.
+- `--include` / `--exclude` glob filters on `property` (already
+  on `fuzz`): sample by tool family (`read_*`, `*.search`)
+  instead of all-or-nothing.
+- `--runs N --aggregate` on `fuzz`: re-runs the plan with
+  derived seeds and tags every finding `stable` / `flaky` /
+  `one-shot`. Filters environmental noise from real bugs
+  before you file them upstream.
+
+Smoke test: the new `prompt-injection-v2` pack (50 variants —
+direct overrides, role injection, jailbreak personas, CoT,
+indirect tool-chaining, multilingual, encoded payloads,
+formatting tricks) flags every leak path in the local
+`examples/python_server` `ask_llm` fixture (12 / 50 fire on
+that fixture's hardcoded leak; the other 38 cover signal
+classes the fixture doesn't emulate). No upstream OSS server
+has been re-tested with v2 yet — the v0.8 release ships the
+infrastructure; the next campaign pass uses it.
+
 ## v0.7 campaign — clean-bill of health on popular MCP servers
 
 The first structured wallfacer campaign ran the v0.6+ pack library

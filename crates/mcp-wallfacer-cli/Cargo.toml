@@ -17,7 +17,7 @@ name = "wallfacer"
 path = "src/main.rs"
 
 [dependencies]
-wallfacer-core = { version = "0.7.0", path = "../wallfacer-core" }
+wallfacer-core = { version = "0.8.0", path = "../wallfacer-core" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 comfy-table = { workspace = true }
@@ -120,3 +120,11 @@ path = "tests/e2e/http_fault_classification.rs"
 [[test]]
 name = "corpus_minimize_shrinks"
 path = "tests/e2e/corpus_minimize_shrinks.rs"
+
+[[test]]
+name = "torture_under_http_faults"
+path = "tests/e2e/torture_under_http_faults.rs"
+
+[[test]]
+name = "flakiness_aggregate"
+path = "tests/e2e/flakiness_aggregate.rs"

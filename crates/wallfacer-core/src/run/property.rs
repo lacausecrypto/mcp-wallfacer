@@ -21,6 +21,7 @@ use crate::{
 use super::{
     destructive::DestructiveDetector,
     exec::McpExec,
+    glob,
     reporter::{Reporter, RunInfo},
 };
 
@@ -84,6 +85,18 @@ pub struct PropertyPlan {
     /// stand-alone property runs keep their existing lifecycle.
     #[doc(hidden)]
     pub defer_run_end: bool,
+    /// Phase AA (v0.8) — cap the live tool list before
+    /// `for_each_tool` expansion. `None` = no cap (every tool the
+    /// server advertises is fair game). Set to e.g. `Some(5)` to
+    /// keep large servers (319-tool sports-hub, 63-tool
+    /// mcp-belgium) tractable.
+    pub max_tools: Option<usize>,
+    /// Phase AA — `globset` patterns selecting which live tools
+    /// `for_each_tool` blocks consider. Empty = match every tool.
+    pub include_globs: Vec<String>,
+    /// Phase AA — `globset` patterns excluded from the live tool
+    /// list. Always honoured.
+    pub exclude_globs: Vec<String>,
 }
 
 impl PropertyPlan {
@@ -103,10 +116,25 @@ impl PropertyPlan {
         // appended to the static ones; from this point on the loop
         // doesn't distinguish them. The same listing also feeds the
         // destructive classifier below.
-        let live_tools = client
+        //
+        // Phase AA (v0.8) — apply the operator's `--include` /
+        // `--exclude` globs and `--max-tools` cap *before* expansion
+        // so for_each_tool blocks fan out only across the kept set.
+        // The destructive classifier (below) still sees the FULL
+        // list because we want it to flag a destructive tool that
+        // the operator filtered in via include/exclude — same
+        // behaviour the fuzz command had since v0.2.
+        let all_live_tools = client
             .list_tools()
             .await
             .context("failed to list tools from MCP server")?;
+        let live_tools = apply_tool_filters(
+            &all_live_tools,
+            &self.include_globs,
+            &self.exclude_globs,
+            self.max_tools,
+        )
+        .context("invalid include/exclude glob in property plan")?;
         let mut all_invariants = self.file.invariants.clone();
         if !self.file.for_each_tool.is_empty() {
             let expanded =
@@ -294,4 +322,226 @@ async fn invoke<C: McpExec + ?Sized>(
 /// [`InvariantFile`]: crate::property::dsl::InvariantFile
 pub fn parse_invariants(source: &str) -> Result<dsl::InvariantFile> {
     dsl::parse(source).context("failed to parse invariants")
+}
+
+/// Phase AA — narrow the live tool list before `for_each_tool` expansion.
+/// Validates each glob with `glob::compile` so an invalid pattern surfaces
+/// once, up-front, rather than silently matching nothing on every tool.
+///
+/// Empty `includes` matches every tool; `excludes` always wins. `max_tools`
+/// truncates after filtering, so the kept set is the first N tools the
+/// server advertised in include/exclude order.
+fn apply_tool_filters(
+    tools: &[rmcp::model::Tool],
+    includes: &[String],
+    excludes: &[String],
+    max_tools: Option<usize>,
+) -> Result<Vec<rmcp::model::Tool>> {
+    for pattern in includes.iter().chain(excludes.iter()) {
+        glob::compile(pattern).with_context(|| format!("invalid glob pattern `{pattern}`"))?;
+    }
+    let mut filtered: Vec<rmcp::model::Tool> = tools
+        .iter()
+        .filter(|tool| glob::matches_filters(tool.name.as_ref(), includes, excludes))
+        .cloned()
+        .collect();
+    if let Some(cap) = max_tools {
+        filtered.truncate(cap);
+    }
+    Ok(filtered)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::client::CallOutcome;
+    use crate::run::exec::MockClient;
+    use crate::run::reporter::Reporter;
+    use crate::target::{AllowDestructiveConfig, DestructiveConfig};
+    use rmcp::model::Tool;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn tool(name: &str) -> Tool {
+        Tool::new(
+            name.to_string(),
+            "test".to_string(),
+            Arc::new(serde_json::Map::new()),
+        )
+    }
+
+    /// Reporter that records every `on_iteration_start` so a test can
+    /// assert which tools the plan actually exercised.
+    #[derive(Default)]
+    struct RecordingReporter {
+        tools_seen: HashSet<String>,
+    }
+
+    impl Reporter for RecordingReporter {
+        fn on_iteration_start(&mut self, tool: &str, _iteration: u64) {
+            self.tools_seen.insert(tool.to_string());
+        }
+    }
+
+    #[test]
+    fn empty_filters_keep_every_tool() {
+        let tools = vec![tool("a"), tool("b"), tool("c")];
+        let kept = apply_tool_filters(&tools, &[], &[], None).expect("filter");
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn max_tools_truncates_after_filtering() {
+        let tools = vec![tool("a"), tool("b"), tool("c"), tool("d")];
+        let kept = apply_tool_filters(&tools, &[], &[], Some(2)).expect("filter");
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].name.as_ref(), "a");
+    }
+
+    #[test]
+    fn include_glob_selects_matches() {
+        let tools = vec![tool("read_users"), tool("write_users"), tool("read_logs")];
+        let kept = apply_tool_filters(&tools, &["read_*".to_string()], &[], None).expect("filter");
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|t| t.name.starts_with("read_")));
+    }
+
+    #[test]
+    fn exclude_overrides_include() {
+        let tools = vec![tool("read_users"), tool("read_secret")];
+        let kept = apply_tool_filters(
+            &tools,
+            &["read_*".to_string()],
+            &["read_secret".to_string()],
+            None,
+        )
+        .expect("filter");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name.as_ref(), "read_users");
+    }
+
+    #[test]
+    fn invalid_glob_surfaces_error() {
+        let tools = vec![tool("a")];
+        let err =
+            apply_tool_filters(&tools, &["[unterminated".to_string()], &[], None).unwrap_err();
+        assert!(err.to_string().contains("invalid glob pattern"));
+    }
+
+    #[test]
+    fn filter_then_cap() {
+        let tools = vec![
+            tool("read_a"),
+            tool("read_b"),
+            tool("read_c"),
+            tool("write_a"),
+        ];
+        let kept =
+            apply_tool_filters(&tools, &["read_*".to_string()], &[], Some(2)).expect("filter");
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|t| t.name.starts_with("read_")));
+    }
+
+    fn detector() -> DestructiveDetector {
+        DestructiveDetector::from_config(
+            &DestructiveConfig::default(),
+            &AllowDestructiveConfig::default(),
+        )
+        .expect("default detector")
+    }
+
+    fn ok_call(_args: &Value) -> CallOutcome {
+        CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+    }
+
+    fn for_each_file() -> dsl::InvariantFile {
+        // No-op assertion list keeps the run free of findings while
+        // still exercising on_iteration_start once per (tool, case).
+        let yaml = r"
+version: 3
+invariants: []
+for_each_tool:
+  - name: 'envelope_{{tool_name}}'
+    apply:
+      cases: 1
+      assert: []
+";
+        dsl::parse(yaml).expect("parse for_each yaml")
+    }
+
+    #[tokio::test]
+    async fn max_tools_caps_for_each_tool_expansion() {
+        // Five tools advertised, cap to two — only two should be exercised.
+        let mut client = MockClient::new()
+            .register(tool("a"), ok_call)
+            .register(tool("b"), ok_call)
+            .register(tool("c"), ok_call)
+            .register(tool("d"), ok_call)
+            .register(tool("e"), ok_call);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let mut reporter = RecordingReporter::default();
+
+        let plan = PropertyPlan {
+            file: for_each_file(),
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: Some(2),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+
+        plan.execute(&mut client, &corpus, &mut reporter)
+            .await
+            .expect("plan executes");
+
+        assert_eq!(
+            reporter.tools_seen.len(),
+            2,
+            "max_tools=2 should cap expansion; saw {:?}",
+            reporter.tools_seen
+        );
+    }
+
+    #[tokio::test]
+    async fn include_glob_narrows_for_each_tool_expansion() {
+        let mut client = MockClient::new()
+            .register(tool("read_a"), ok_call)
+            .register(tool("read_b"), ok_call)
+            .register(tool("write_a"), ok_call)
+            .register(tool("write_b"), ok_call);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let mut reporter = RecordingReporter::default();
+
+        let plan = PropertyPlan {
+            file: for_each_file(),
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: vec!["read_*".to_string()],
+            exclude_globs: Vec::new(),
+        };
+
+        plan.execute(&mut client, &corpus, &mut reporter)
+            .await
+            .expect("plan executes");
+
+        let seen: Vec<&String> = reporter.tools_seen.iter().collect();
+        assert_eq!(reporter.tools_seen.len(), 2, "saw {seen:?}");
+        assert!(reporter.tools_seen.iter().all(|t| t.starts_with("read_")));
+    }
 }

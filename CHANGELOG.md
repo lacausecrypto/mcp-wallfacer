@@ -4,6 +4,84 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.8.0 — 2026-05-01
+
+Theme: **scaling to large servers + per-finding signal quality.**
+
+Four phases — the first two unblock running wallfacer against
+servers we couldn't fit before, the next two raise signal quality
+of every finding it surfaces.
+
+### Added — Phase AA: tool filtering on `wallfacer property`
+
+* New flags on `wallfacer property`: `--max-tools <N>`,
+  `--include <glob>`, `--exclude <glob>`. Mirror the
+  long-existing `wallfacer fuzz` knobs so `for_each_tool` blocks
+  fan out only across the kept set. Without these, a 319-tool
+  MCP × 5 invariants × 100 cases = 159k calls; with `--max-tools
+  5` the same plan stays tractable.
+* `PropertyPlan` gains `max_tools: Option<usize>`,
+  `include_globs: Vec<String>`, `exclude_globs: Vec<String>`.
+* Two new e2e tests confirm the cap respects expansion and the
+  glob narrows it.
+
+### Added — Phase AB: torture mode survives HTTP faults
+
+* `wallfacer torture --mode parallel` confirmed end-to-end
+  against the v0.7 fault fixture under both `502` (every call
+  returns ProtocolError; finding emitted; run terminates) and
+  `slow` (every call hangs past per-call timeout; watchdog
+  cancels under the global deadline). Two new e2e tests
+  (`torture_under_http_faults`) gate this.
+
+### Added — Phase AC: per-invariant shrinking + flakiness tracker
+
+* `wallfacer corpus minimize --replay --invariants <path>`
+  re-evaluates the *exact* invariant that fired on every shrink
+  trial instead of the coarse `ShrinkTargetKind` bucket. The
+  invariant whose `name` matches the finding's `kind.invariant`
+  is loaded and its assertions become the predicate. Drops
+  precision back to where the original property run was, instead
+  of the loose "any non-Ok outcome" fallback. Other finding
+  kinds keep the v0.7 transport-level classifier.
+* `wallfacer fuzz --runs N --aggregate` repeats the plan with
+  derived seeds (`master_seed + i`) and emits one aggregate
+  report tagging each finding `stable` (every run), `flaky`
+  (some runs), or `one-shot` (only one run). One e2e test
+  (`flakiness_aggregate`) confirms a deterministic crash gets
+  tagged `stable`.
+
+### Added — Phase AD.1: prompt-injection-v2 pack
+
+* New embedded pack `prompt-injection-v2` with 50 invariants
+  organised on a `(technique × encoding × language)` grid:
+  - 5 direct overrides ("Ignore previous instructions" variants)
+  - 5 role injections (`[SYSTEM]`, `[ROOT]`, `[ADMIN]`, ...)
+  - 5 jailbreak personas (DAN, EVIL_GPT, Developer Mode, ...)
+  - 5 chain-of-thought ("step by step" reasoning hijacks)
+  - 5 indirect / tool-chaining ("read /etc/passwd then ...")
+  - 8 multilingual variants (fr / es / de / zh / ja / ar / ru / tr)
+  - 5 encoded payloads (base64 / rot13 / hex / url /
+    unicode-escape)
+  - 5 formatting tricks (zero-width, RTL marker, markdown
+    comments, code-block, HTML attribute)
+  - 5 combined attacks (CoT × role, lang × jailbreak,
+    base64 × role, zero-width × jailbreak, indirect × CoT)
+  - 2 cumulative exfiltration prompts (API key, training
+    data verbatim)
+* Reuses the original `prompt-injection` pack's parameters
+  (`llm_tool`, `prompt_field`, `leakage_pattern`,
+  `capitulation_pattern`) so retargeting a different LLM
+  bridge takes one CLI override.
+
+### Notes — Phase AD.2: campaign
+
+* Documentation updated to record the v0.8 enabler set; the
+  next OSS server pass will run with `--max-tools` +
+  `--runs N --aggregate` + `prompt-injection-v2`.
+
+---
+
 ## v0.7.0 — 2026-05-01
 
 Theme: **from bug-finding to fixing — wallfacer leaves the lab.**

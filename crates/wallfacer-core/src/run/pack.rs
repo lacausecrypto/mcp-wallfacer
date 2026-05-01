@@ -68,6 +68,10 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "prompt-injection",
         include_str!("../../packs/prompt-injection.yaml"),
     ),
+    (
+        "prompt-injection-v2",
+        include_str!("../../packs/prompt-injection-v2.yaml"),
+    ),
     ("rate-limit", include_str!("../../packs/rate-limit.yaml")),
     (
         "secrets-leakage",

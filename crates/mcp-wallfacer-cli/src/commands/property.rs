@@ -65,6 +65,25 @@ pub struct PropertyArgs {
     /// and the v0.6 `fuzz` default.
     #[arg(long, default_value_t = 0.9)]
     pub mutate_ratio: f64,
+    /// Phase AA (v0.8) — cap the number of tools targeted by
+    /// `for_each_tool` blocks. Without this, packs that fan out
+    /// across every server tool become unusable on large servers
+    /// (a 319-tool MCP × 5 invariants × 100 cases = 159k calls).
+    /// `--max-tools 5` truncates the live tool list to the first
+    /// five (alphabetical) before expansion. Mirrors the existing
+    /// `wallfacer fuzz --max-tools` flag.
+    #[arg(long)]
+    pub max_tools: Option<usize>,
+    /// Phase AA — glob patterns selecting which tools the
+    /// `for_each_tool` expander considers. Empty = match every
+    /// tool. Repeatable. Mirrors `wallfacer fuzz --include`.
+    #[arg(long)]
+    pub include: Vec<String>,
+    /// Phase AA — glob patterns excluded from the expanded set.
+    /// Always honoured. Repeatable. Mirrors `wallfacer fuzz
+    /// --exclude`.
+    #[arg(long)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -111,6 +130,9 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
         // sequence sub-run can stream its findings into the same
         // table before it gets printed.
         defer_run_end: !sequences.is_empty(),
+        max_tools: args.max_tools,
+        include_globs: args.include.clone(),
+        exclude_globs: args.exclude.clone(),
     };
 
     let mut reporter: Box<dyn Reporter> = match args.format {

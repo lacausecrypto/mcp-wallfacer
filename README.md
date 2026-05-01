@@ -239,7 +239,8 @@ A parallel HTTP fixture lives at [`examples/python_server/server_http.py`](examp
 - **v0.5** ✅ — `wallfacer suggest` (auto-detect which packs apply), `wallfacer coverage` (tool × pack matrix + `--strict` CI gate), `wallfacer report --html` (self-contained dashboard).
 - **v0.6** ✅ — stateful fuzzing with persistent corpus + 90/10 mutate-vs-random (`fuzz --corpus-feedback`), `mcp-spec-conformance` pack (validates the MCP wire-format itself), `context-poisoning` pack (detects malicious servers planting prompt injections), `$.tool.{name,description,annotations}` DSL extension.
 - **v0.7** ✅ — sequence corpus seeding (cross-pollinates fuzz + sequences), HTTP fault injection fixture (`502 / 504 / FIN-empty / FIN-mid / slow`), real input shrinker (`corpus minimize --replay`, delta-debug), real-world campaign across 6 popular OSS MCPs (clean-bill of health, methodology in `docs/real-world-findings.md`).
-- **v0.8** — per-invariant shrinking (re-evaluate the exact failing invariant on each shrink trial), HTTP torture mode (`torture --mode http-faults` driving the v0.7 fault fixture under concurrent load), grammar-aware prompt-injection variants (jailbreak chains-of-thought, multilingual, base64-encoded), continued real-world campaign on the next batch of OSS MCPs.
+- **v0.8** ✅ — `wallfacer property --max-tools / --include / --exclude` (scales packs to large servers), torture mode confirmed under HTTP faults, per-invariant shrinking (`corpus minimize --replay --invariants <path>`), flakiness tracker (`fuzz --runs N --aggregate` tags `stable` / `flaky` / `one-shot`), `prompt-injection-v2` pack (50 variants spanning jailbreak / chain-of-thought / multilingual / encoded-payload / formatting-trick attacks).
+- **v0.9** — continued real-world campaign on large MCPs (now unblocked by `--max-tools`), grammar DSL for user-defined prompt-injection variants, sequence-aware shrinker (delta-debug across sequence steps).
 
 ## Contributing
 

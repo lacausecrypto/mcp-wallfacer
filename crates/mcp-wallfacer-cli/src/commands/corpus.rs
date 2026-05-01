@@ -1,13 +1,18 @@
-use std::{path::Path, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use serde_json::Value;
+use serde_json::{json, Value};
 use wallfacer_core::{
     client::{CallOutcome, Client},
     corpus::Corpus,
     finding::{Finding, FindingKind},
+    property::{dsl, runner},
     redact::REDACTED_PLACEHOLDER,
     target::{default_corpus_dir, Config},
 };
@@ -44,6 +49,18 @@ pub enum CorpusCommand {
         /// v0.6.x).
         #[arg(long)]
         replay: bool,
+        /// Phase AC.1 (v0.8) — re-evaluate the exact invariant
+        /// that produced the finding on every shrink trial,
+        /// instead of the coarse `ShrinkTargetKind` bucket.
+        ///
+        /// Pass the YAML file (or pack) the invariant lives in;
+        /// the invariant whose `name` matches the finding's
+        /// `kind.invariant` is loaded and its assertions become
+        /// the predicate. Only meaningful for `property_failure`
+        /// findings — other kinds keep using the transport-level
+        /// classifier.
+        #[arg(long)]
+        invariants: Option<PathBuf>,
     },
 }
 
@@ -61,9 +78,11 @@ pub async fn run(args: CorpusArgs, config_path: Option<&Path>) -> Result<()> {
         CorpusCommand::List => list(&corpus),
         CorpusCommand::Show { id } => show(&corpus, &id),
         CorpusCommand::Replay { id, all } => replay(&corpus, config.as_ref(), id, all).await,
-        CorpusCommand::Minimize { id, replay } => {
-            minimize(&corpus, config.as_ref(), &id, replay).await
-        }
+        CorpusCommand::Minimize {
+            id,
+            replay,
+            invariants,
+        } => minimize(&corpus, config.as_ref(), &id, replay, invariants.as_deref()).await,
     }
 }
 
@@ -163,7 +182,13 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
     }
 }
 
-async fn minimize(corpus: &Corpus, config: Option<&Config>, id: &str, replay: bool) -> Result<()> {
+async fn minimize(
+    corpus: &Corpus,
+    config: Option<&Config>,
+    id: &str,
+    replay: bool,
+    invariants_path: Option<&Path>,
+) -> Result<()> {
     let finding = corpus.find_by_id(id)?;
 
     if !replay {
@@ -190,6 +215,40 @@ async fn minimize(corpus: &Corpus, config: Option<&Config>, id: &str, replay: bo
     })?;
     let target_kind = wallfacer_core::shrink::ShrinkTargetKind::from_finding_kind(&finding.kind);
 
+    // Phase AC.1 — when `--invariants <path>` is set and the
+    // finding is a PropertyFailure, load the matching invariant
+    // and use it as the predicate so each shrink trial re-runs
+    // the *exact* assertions that fired originally. Other finding
+    // kinds (or no path) keep the transport-level classifier.
+    let invariant = match (invariants_path, &finding.kind) {
+        (Some(path), FindingKind::PropertyFailure { invariant: name }) => {
+            let source = fs::read_to_string(path)
+                .with_context(|| format!("failed to read invariants file {}", path.display()))?;
+            let file = dsl::parse(&source).context("failed to parse invariants")?;
+            let found = file
+                .invariants
+                .iter()
+                .find(|i| &i.name == name)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "invariants file `{}` has no invariant named `{name}`",
+                        path.display()
+                    )
+                })?;
+            Some(found)
+        }
+        (Some(path), other) => {
+            eprintln!(
+                "note: --invariants {} ignored: finding kind is `{}`, not `property_failure`",
+                path.display(),
+                other.keyword()
+            );
+            None
+        }
+        (None, _) => None,
+    };
+
     let original = finding.repro.tool_call.clone();
     let tool = finding.tool.clone();
     let timeout = Duration::from_millis(config.target.timeout_ms);
@@ -198,16 +257,48 @@ async fn minimize(corpus: &Corpus, config: Option<&Config>, id: &str, replay: bo
         .with_context(|| "failed to connect to MCP target for replay-based shrink")?;
 
     eprintln!(
-        "shrinking finding `{id}` (tool=`{tool}`, kind={:?}) — each trial is one tool call against the target",
-        target_kind
+        "shrinking finding `{id}` (tool=`{tool}`, kind={:?}) — each trial is one tool call against the target{}",
+        target_kind,
+        if invariant.is_some() {
+            " (per-invariant predicate)"
+        } else {
+            ""
+        }
     );
+
+    // For per-invariant shrinking we need the live tool's
+    // metadata so `evaluate_with_tool` can inject `$.tool`. Look
+    // it up once, before the shrink loop, so we don't pay the
+    // listing cost on every trial.
+    let live_tool = if invariant.is_some() {
+        client
+            .list_tools()
+            .await
+            .ok()
+            .and_then(|tools| tools.into_iter().find(|t| t.name.as_ref() == tool))
+    } else {
+        None
+    };
 
     let result = wallfacer_core::shrink::shrink_async(&original, |candidate| {
         let client = client.clone();
         let tool = tool.clone();
+        let invariant = invariant.clone();
+        let live_tool = live_tool.clone();
         async move {
-            let outcome = client.call_tool(&tool, candidate, timeout).await;
-            target_kind.matches_outcome(&outcome)
+            let outcome = client.call_tool(&tool, candidate.clone(), timeout).await;
+            if let Some(invariant) = invariant {
+                // Per-invariant predicate: shape the response the
+                // same way `PropertyPlan::execute` does, then
+                // re-run the assertions. "Still fires" means the
+                // assertions failed — i.e. the trial input still
+                // breaks the same invariant.
+                let response = call_outcome_to_response(&outcome);
+                runner::evaluate_with_tool(&invariant, candidate, response, live_tool.as_ref())
+                    .is_err()
+            } else {
+                target_kind.matches_outcome(&outcome)
+            }
         }
     })
     .await;
@@ -227,6 +318,29 @@ async fn minimize(corpus: &Corpus, config: Option<&Config>, id: &str, replay: bo
     );
     println!("{}", serde_json::to_string_pretty(&result.minimised)?);
     Ok(())
+}
+
+/// Phase AC.1 — mirrors the response shape `PropertyPlan::execute`
+/// builds in `wallfacer_core::run::property`. Re-runs of an
+/// invariant must see the same `{content, isError}` envelope shape
+/// as the original run, otherwise the JSONPath assertions wouldn't
+/// match the same fields.
+fn call_outcome_to_response(outcome: &CallOutcome) -> Value {
+    match outcome {
+        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
+        CallOutcome::Hang(duration) => json!({
+            "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
+            "isError": true,
+        }),
+        CallOutcome::Crash(reason) => json!({
+            "content": [{"type": "text", "text": reason}],
+            "isError": true,
+        }),
+        CallOutcome::ProtocolError(message) => json!({
+            "content": [{"type": "text", "text": message}],
+            "isError": true,
+        }),
+    }
 }
 
 fn compact_json(value: &Value) -> String {

@@ -25,7 +25,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 _REPO = "lacausecrypto/mcp-wallfacer"
 _RELEASE_TEMPLATE = "https://github.com/{repo}/releases/download/{version}/{archive}"
