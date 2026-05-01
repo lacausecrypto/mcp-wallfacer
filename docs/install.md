@@ -11,7 +11,7 @@ underlying `wallfacer` CLI is byte-identical across all of them.
 | **GitHub release** | Download the matching tarball from the [Releases page](https://github.com/lacausecrypto/mcp-wallfacer/releases) | You want a single static binary with no toolchain dep. Best for air-gapped servers. |
 | **npm** | `npm install -g mcp-wallfacer` | You're a TypeScript / JavaScript MCP author. The wrapper postinstall-downloads the GitHub release binary. |
 | **pip** | `pip install mcp-wallfacer` | You're a Python MCP author. Same wrapper trick: the Python launcher fetches the binary on first invocation. |
-| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.4.1` | You want wallfacer running in CI. The action handles install, caching, and forwards arguments to `wallfacer property`. |
+| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.8.1` | You want wallfacer running in CI. The action handles install, caching, and forwards arguments to `wallfacer property`. |
 
 ## Cargo
 
@@ -35,7 +35,7 @@ Each tagged release publishes five binaries:
 - `wallfacer-x86_64-pc-windows-msvc.zip`
 
 ```bash
-VERSION=v0.4.1
+VERSION=v0.8.1
 TRIPLE=aarch64-apple-darwin   # adjust per host
 curl -LO "https://github.com/lacausecrypto/mcp-wallfacer/releases/download/${VERSION}/wallfacer-${TRIPLE}.tar.gz"
 tar xzf "wallfacer-${TRIPLE}.tar.gz"
@@ -77,7 +77,7 @@ Set `WALLFACER_CACHE_DIR=/path` to override the cache location.
 
 ```yaml
 - name: Run wallfacer
-  uses: lacausecrypto/mcp-wallfacer@v0.4.1
+  uses: lacausecrypto/mcp-wallfacer@v0.8.1
   with:
     pack-all: "true"
     config: wallfacer.toml
@@ -93,7 +93,7 @@ The action is a [composite action](../action.yml). Inputs:
 
 | Input | Default | Notes |
 |---|---|---|
-| `version` | `v0.4.1` | Pin to a specific release. |
+| `version` | `v0.8.1` | Pin to a specific release. |
 | `pack` | empty | Newline-separated list of packs to run. |
 | `pack-all` | `false` | When `true`, runs every embedded pack. Mutually exclusive with `pack`. |
 | `config` | `wallfacer.toml` | Path to your `wallfacer.toml`. |

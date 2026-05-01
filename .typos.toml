@@ -23,4 +23,7 @@ extend-exclude = [
     # Turkish "sistem", and zero-width-split "Ig​nore" all read as
     # English typos to the spellchecker but are the test corpus by design.
     "crates/wallfacer-core/packs/prompt-injection*.yaml",
+    # The auto-generated rendered pack reference embeds the same
+    # YAML verbatim, so it inherits the same allowlist.
+    "docs/packs/prompt-injection*.md",
 ]

@@ -118,8 +118,13 @@ SARIF) and writes them to `.wallfacer/corpus/`. For each finding:
    exact tool call. Confirm the buggy behavior is deterministic.
 2. **Classify**: real bug, pack-parameter mismatch, or pack false
    positive.
-3. **Minimize** — `wallfacer corpus minimize <id>` (placeholder; manually
-   trim the payload until it still reproduces).
+3. **Minimize** — `wallfacer corpus minimize <id> --replay` shrinks
+   the input by re-driving it against the live target (delta-debug
+   on object keys / string halving / array element drops). For
+   `property_failure` findings, v0.8 auto-engages the per-invariant
+   predicate so the shrinker re-evaluates the exact failing
+   invariant on every trial; pass `--invariants <path>` when the
+   invariant lives in a custom workspace pack.
 4. **Document** — `wallfacer corpus show <id>` for the JSON record.
 
 For pack false positives: open an issue against `mcp-wallfacer` with
