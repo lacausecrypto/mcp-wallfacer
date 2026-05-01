@@ -17,7 +17,7 @@ name = "wallfacer"
 path = "src/main.rs"
 
 [dependencies]
-wallfacer-core = { version = "0.4.1", path = "../wallfacer-core" }
+wallfacer-core = { version = "0.4.2", path = "../wallfacer-core" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 comfy-table = { workspace = true }
@@ -36,6 +36,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
@@ -79,3 +80,7 @@ path = "tests/e2e/phase_j_acceptance.rs"
 [[test]]
 name = "sequence_catches_state_leak"
 path = "tests/e2e/sequence_catches_state_leak.rs"
+
+[[test]]
+name = "http_target_runs_packs"
+path = "tests/e2e/http_target_runs_packs.rs"

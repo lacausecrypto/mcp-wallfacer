@@ -4,6 +4,64 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.4.2 — 2026-05-01
+
+Phase M: **HTTP / Streamable transport gated in CI**. v0.3 already
+shipped the HTTP target code path through `rmcp::StreamableHttpClientTransport`,
+but it was only exercised against external servers in manual smoke
+tests. v0.4.2 adds a local HTTP MCP fixture, an end-to-end
+acceptance test, and the missing operator docs.
+
+### Added
+
+* **HTTP MCP fixture** at
+  [`examples/python_server/server_http.py`](examples/python_server/server_http.py)
+  — pure-stdlib Python (`http.server.ThreadingHTTPServer`) that
+  exposes the same buggy tool catalog as the stdio `server.py` over
+  a single `POST /mcp` endpoint. Replies with
+  `Content-Type: application/json`, which `rmcp`'s client accepts
+  alongside the SSE variant.
+* **Phase M acceptance suite** at
+  [`crates/mcp-wallfacer-cli/tests/e2e/http_target_runs_packs.rs`](crates/mcp-wallfacer-cli/tests/e2e/http_target_runs_packs.rs).
+  Two tests:
+  - `http_transport_runs_secrets_leakage_pack_against_python_fixture`
+    spawns the HTTP fixture, points wallfacer at it, runs the
+    `secrets-leakage` pack, and asserts the same findings surface
+    over HTTP as over stdio (the fixture's `bug_log` echo trips
+    `secrets.bearer_tokens_not_echoed` etc).
+  - `http_transport_doctor_lists_tools_with_capability_aware_resources`
+    confirms `doctor` reports `transport=http` and renders `n/a`
+    for the resources / prompts capabilities the fixture doesn't
+    advertise (the v0.3.3 capability-aware fix applies cleanly to
+    HTTP targets too).
+* **`docs/http-target.md`** — operator-facing reference covering
+  `[target] kind = "http"` config, env-var header expansion (`${VAR}`
+  added in v0.3.2), the local fixture, what's CI-gated vs.
+  manually-verified, and known limitations (no HTTP-specific
+  torture mode yet).
+
+### Tests & quality
+
+* New e2e test exercises the HTTP transport end-to-end on every CI
+  run; the previous coverage was stdio-only against
+  `examples/python_server/server.py`.
+* `pack test --all` still 117/117. `cargo fmt`, `cargo clippy -D
+  warnings`, `cargo test --workspace --locked`, and
+  `RUSTDOCFLAGS=-D warnings cargo doc` all clean.
+
+### Notes
+
+* The Phase M fixture is **JSON-only** (no SSE push). `rmcp` accepts
+  both `application/json` and `text/event-stream` responses; servers
+  that speak only SSE are not currently CI-gated but should work
+  end-to-end based on the manual smoke tests against `mcp-belgium`
+  and `@modelcontextprotocol/server-everything`. Tracking that as a
+  v0.4.3+ follow-up.
+* No HTTP-specific torture pack yet — `wallfacer torture` runs over
+  HTTP but the destructive guard / cancellation paths haven't been
+  hardened against HTTP-specific failure modes (proxy 502s,
+  mid-stream disconnects). Out of scope for this release.
+
 ## v0.4.1 — 2026-05-01
 
 Phase N: **distribution + reach**. Same Rust binary, four new install
