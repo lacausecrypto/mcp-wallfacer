@@ -79,6 +79,20 @@ pub fn evaluate(invariant: &Invariant, input: Value, response: Value) -> Result<
     evaluate_step_assertions(&invariant.assertions, input, response)
 }
 
+/// Like [`evaluate`] but also injects a `$.tool` block holding the
+/// matched tool's `name`, `description`, and `annotations` (Phase
+/// T). Packs that scan tool metadata for poisoning markers reach
+/// for `$.tool.description` etc.; older invariants ignore the
+/// extra field.
+pub fn evaluate_with_tool(
+    invariant: &Invariant,
+    input: Value,
+    response: Value,
+    tool: Option<&rmcp::model::Tool>,
+) -> Result<()> {
+    evaluate_step_assertions_with_tool(&invariant.assertions, input, response, tool)
+}
+
 /// Evaluates a free-form list of assertions against a fresh
 /// `{input, response}` context. Used by the sequence runner where
 /// the assertions live on a [`super::dsl::SequenceStep`] rather than
@@ -89,9 +103,32 @@ pub fn evaluate_step_assertions(
     input: Value,
     response: Value,
 ) -> Result<()> {
+    evaluate_step_assertions_with_tool(assertions, input, response, None)
+}
+
+/// Like [`evaluate_step_assertions`] but injects `$.tool` when the
+/// caller has the matched live tool in hand. Used by the property
+/// runner when an invariant came out of a `for_each_tool` block.
+pub fn evaluate_step_assertions_with_tool(
+    assertions: &[Assertion],
+    input: Value,
+    response: Value,
+    tool: Option<&rmcp::model::Tool>,
+) -> Result<()> {
+    let tool_value = tool
+        .map(|t| {
+            let annotations = serde_json::to_value(&t.annotations).unwrap_or(Value::Null);
+            json!({
+                "name": t.name.as_ref(),
+                "description": t.description.as_deref().unwrap_or(""),
+                "annotations": annotations,
+            })
+        })
+        .unwrap_or(Value::Null);
     let context = json!({
         "input": input,
         "response": response,
+        "tool": tool_value,
     });
     for assertion in assertions {
         evaluate_assertion(assertion, &context)?;

@@ -210,7 +210,13 @@ impl PropertyPlan {
                 };
                 let response = invoke(client, &invariant.tool, input.clone(), self.timeout).await;
 
-                if let Err(error) = runner::evaluate(invariant, input.clone(), response.clone()) {
+                let live_tool = tool_index.get(&invariant.tool).copied();
+                if let Err(error) = runner::evaluate_with_tool(
+                    invariant,
+                    input.clone(),
+                    response.clone(),
+                    live_tool,
+                ) {
                     let mut finding = Finding::new(
                         FindingKind::PropertyFailure {
                             invariant: invariant.name.clone(),

@@ -13,7 +13,8 @@ use crate::{
     client::CallOutcome,
     corpus::Corpus,
     finding::{Finding, FindingKind, ReproInfo},
-    mutate::{try_generate_payload, GenMode},
+    fuzz_corpus::{response_fingerprint, CorpusTrigger, FuzzCorpus, FuzzCorpusEntry},
+    mutate::{corpus_mutator, try_generate_payload, GenMode},
     seed::{derive_seed, derive_seed_canonical},
     target::SeverityConfig,
 };
@@ -93,6 +94,19 @@ pub struct FuzzPlan {
     /// `[severity]` overrides from `wallfacer.toml`. Applied to every
     /// produced finding before it lands on disk.
     pub severity: SeverityConfig,
+    /// Phase R — optional persistent fuzz corpus. When set, the
+    /// loop pulls inputs that triggered findings or new response
+    /// fingerprints from prior runs and mutates from them
+    /// `mutate_ratio` fraction of the time. Pure schema-driven
+    /// generation handles the remainder so the fuzzer keeps
+    /// exploring beyond the corpus's basin.
+    pub fuzz_corpus: Option<FuzzCorpus>,
+    /// Phase R — fraction of iterations that mutate from the
+    /// corpus instead of generating fresh schema-driven payloads.
+    /// Default `0.9` matches AFL/libFuzzer convention. Ignored
+    /// when [`Self::fuzz_corpus`] is `None` or the corpus is
+    /// empty.
+    pub mutate_ratio: f64,
 }
 
 impl FuzzPlan {
@@ -129,36 +143,85 @@ impl FuzzPlan {
             blocked,
         };
 
+        // Phase R — preload the corpus (if enabled) and the
+        // fingerprint set so we can dedup novel responses against
+        // prior runs.
+        let mut seen_fingerprints: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        if let Some(corpus_ref) = self.fuzz_corpus.as_ref() {
+            for tool in &tools {
+                let tool_name = tool.name.to_string();
+                if let Ok(entries) = corpus_ref.list(&tool_name) {
+                    for e in entries {
+                        seen_fingerprints.insert(e.fingerprint);
+                    }
+                }
+            }
+        }
+
         for tool in tools {
             let tool_name = tool.name.to_string();
             let input_schema = Value::Object((*tool.input_schema).clone());
+            // Cache prior corpus entries for THIS tool so the
+            // 90/10 split doesn't re-list every iteration.
+            let prior_corpus: Vec<FuzzCorpusEntry> = self
+                .fuzz_corpus
+                .as_ref()
+                .map(|c| c.list(&tool_name).unwrap_or_default())
+                .unwrap_or_default();
+
             for iteration in 0..self.iterations {
                 reporter.on_iteration_start(&tool_name, iteration);
 
                 let seed = derive_seed(self.master_seed, &tool_name, iteration);
                 let canonical = derive_seed_canonical(self.master_seed, &tool_name, iteration);
                 let mut rng = ChaCha20Rng::from_seed(canonical);
-                let payload = match try_generate_payload(&input_schema, &mut rng, self.mode) {
-                    Ok(payload) => payload,
-                    Err(reason) => {
-                        let skip = SkippedTool {
-                            tool: tool_name.clone(),
-                            reason: reason.to_string(),
-                        };
-                        reporter.on_skipped(&skip.tool, &skip.reason);
-                        report.skipped.push(skip);
-                        // Bump remaining iterations on the reporter so the
-                        // progress bar accounts for the skipped tail.
-                        for i in (iteration + 1)..self.iterations {
-                            reporter.on_iteration_end(&tool_name, i);
+
+                // 90/10 mutate-vs-random when the corpus has at
+                // least one prior entry for this tool. Without a
+                // corpus or with an empty per-tool sub-corpus we
+                // fall back to pure schema-driven generation.
+                use rand::Rng;
+                let use_mutation = !prior_corpus.is_empty()
+                    && self.fuzz_corpus.is_some()
+                    && rng.gen_bool(self.mutate_ratio.clamp(0.0, 1.0));
+                let (payload_value, payload_trail): (Value, Vec<String>) = if use_mutation {
+                    let pick = &prior_corpus[rng.gen_range(0..prior_corpus.len())];
+                    let mutated = corpus_mutator::mutate(&pick.input, &mut rng);
+                    (mutated, vec![format!("mutated from corpus seed")])
+                } else {
+                    match try_generate_payload(&input_schema, &mut rng, self.mode) {
+                        Ok(payload) => (payload.value, payload.trail),
+                        Err(reason) => {
+                            let skip = SkippedTool {
+                                tool: tool_name.clone(),
+                                reason: reason.to_string(),
+                            };
+                            reporter.on_skipped(&skip.tool, &skip.reason);
+                            report.skipped.push(skip);
+                            // Bump remaining iterations on the reporter so the
+                            // progress bar accounts for the skipped tail.
+                            for i in (iteration + 1)..self.iterations {
+                                reporter.on_iteration_end(&tool_name, i);
+                            }
+                            break;
                         }
-                        break;
                     }
                 };
 
                 let outcome = client
-                    .call_tool(&tool_name, payload.value.clone(), self.timeout)
+                    .call_tool(&tool_name, payload_value.clone(), self.timeout)
                     .await;
+
+                // Phase R — capture the response fingerprint
+                // *before* we destructure outcome (the match below
+                // moves Hang/Crash/ProtocolError out of the enum).
+                let response_value: Value = match &outcome {
+                    CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                };
+                let fingerprint = response_fingerprint(&response_value);
+
                 let kind_message_details: Option<(FindingKind, &str, String)> = match outcome {
                     CallOutcome::Ok(_) => None,
                     CallOutcome::Hang(duration) => Some((
@@ -188,9 +251,9 @@ impl FuzzPlan {
                         details,
                         ReproInfo {
                             seed,
-                            tool_call: payload.value,
+                            tool_call: payload_value.clone(),
                             transport: self.transport_name.clone(),
-                            composition_trail: payload.trail,
+                            composition_trail: payload_trail,
                         },
                     );
                     if let Some(override_sev) = self.severity.resolve(finding.kind.keyword()) {
@@ -201,11 +264,41 @@ impl FuzzPlan {
                         .with_context(|| format!("failed to persist finding for `{tool_name}`"))?;
                     reporter.on_finding(&finding);
                     report.findings_count += 1;
+                    // Phase R — input that triggered a finding is
+                    // the highest-value corpus entry. Save it
+                    // before the reconnect (the reconnect is best-
+                    // effort).
+                    if let Some(corpus_ref) = self.fuzz_corpus.as_ref() {
+                        let _ = corpus_ref.save(&FuzzCorpusEntry {
+                            tool: tool_name.clone(),
+                            input: payload_value.clone(),
+                            trigger: CorpusTrigger::Finding {
+                                kind: finding.kind.keyword().to_string(),
+                            },
+                            fingerprint: fingerprint.clone(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
                     client.reconnect().await.with_context(|| {
                         format!("failed to reconnect after fault on `{tool_name}`")
                     })?;
                     reporter.on_iteration_end(&tool_name, iteration);
                     break;
+                }
+
+                // Phase R — non-finding outcome. Save the input
+                // when the response fingerprint is novel (helps
+                // the next run explore further from this point).
+                if let Some(corpus_ref) = self.fuzz_corpus.as_ref() {
+                    if seen_fingerprints.insert(fingerprint.clone()) {
+                        let _ = corpus_ref.save(&FuzzCorpusEntry {
+                            tool: tool_name.clone(),
+                            input: payload_value,
+                            trigger: CorpusTrigger::NewFingerprint,
+                            fingerprint,
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
                 }
 
                 reporter.on_iteration_end(&tool_name, iteration);
@@ -281,6 +374,8 @@ mod tests {
             transport_name: "mock".to_string(),
             detector,
             severity: SeverityConfig::default(),
+            fuzz_corpus: None,
+            mutate_ratio: 0.0,
         }
     }
 

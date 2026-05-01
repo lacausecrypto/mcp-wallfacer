@@ -4,6 +4,98 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.6.0 — 2026-05-01
+
+Three new bug-finding capabilities — the v0.5 audit's "still
+missing" list, fully shipped:
+
+### Added — Phase R: stateful fuzzing with corpus feedback
+
+* **Persistent fuzz corpus** at `<corpus_dir>/../fuzz_corpus/<tool>/`.
+  Inputs that trigger findings, or produce a previously-unseen
+  response fingerprint, are saved as JSON entries. The fuzzer reads
+  them on subsequent runs and mutates from them rather than
+  re-rolling pure random payloads from scratch — same idea as
+  libFuzzer / AFL, scaled to MCP's RPC model.
+* **`wallfacer fuzz --corpus-feedback`** flag enables the corpus.
+  `--corpus-dir <path>` overrides the default location.
+  `--mutate-ratio 0.0..=1.0` (default `0.9`) controls the
+  mutate-vs-random split.
+* **Mutation engine** (`wallfacer_core::mutate::corpus_mutator`) with
+  seven strategies: byte/string nudge, Unicode-trickery, integer
+  boundary nudge, boolean flip, type flip (string↔number↔null),
+  drop-key, grow-array. Plus `splice` for combining two corpus
+  entries when one converges into a basin.
+* **Conservative response fingerprinting** (`fuzz_corpus::response_fingerprint`):
+  hashes `isError`, the type sequence of `content[*]`, and the
+  first 64 chars of `content[0].text`. Tight enough to spot
+  "different class of response", loose enough not to flag every
+  byte-level difference as novel.
+* Public API: `wallfacer_core::fuzz_corpus::{FuzzCorpus,
+  FuzzCorpusEntry, CorpusTrigger, response_fingerprint, input_key}`.
+
+### Added — Phase S: `mcp-spec-conformance` rule pack
+
+* First public MCP-spec compliance pack. Distinct from "are this
+  server's tools correct?" (the rest of the wallfacer pack
+  library) — this asks "does this server speak MCP correctly?".
+* Validates the wire-format envelope on every tool response:
+  `content` array required, `isError` is a boolean when present,
+  every content item carries a `type`, `structuredContent` is an
+  object when present.
+* Inherits the `idempotency` pack (extends mechanism) so
+  `idempotentHint: true` tools also get their stability checked
+  in one go.
+* Total embedded packs goes from 17 to 19.
+
+### Added — Phase T: `context-poisoning` rule pack
+
+* Detects malicious MCP servers planting prompt injections. New
+  threat model not covered by any single-tool pack: the server
+  itself is the attacker.
+* Description-side checks (every tool, one-time scan): "ignore
+  previous instructions" patterns, role-override markers
+  (`<|system|>`, `[INST]`), BIDI override codepoints, exfiltration
+  URLs.
+* Response-side checks (per call): same patterns, scanned in
+  `content[0].text` so a server that injects mid-conversation
+  is also caught.
+* Phase T DSL extension: assertion context now exposes
+  `$.tool.name`, `$.tool.description`, `$.tool.annotations` for
+  `for_each_tool` invariants. Older invariants ignore the field;
+  the runner's existing `evaluate(...)` keeps working unchanged.
+* Public API: new `evaluate_with_tool` /
+  `evaluate_step_assertions_with_tool` helpers in
+  `wallfacer_core::property::runner`.
+
+### Added — fixture coverage
+
+* `examples/python_server/server.py` gets two new buggy tools:
+  `poisoned_helper` (description-side injection +
+  exfil URL) and `poisoned_response` (role-override markers in
+  the response). Both are now CI-gated by the new e2e suites.
+
+### Tests & quality
+
+* New e2e suites: `context_poisoning_catches`,
+  `spec_conformance_catches`, `fuzz_corpus_accumulates`.
+* `pack test --all` 144/145 fixtures pass (one structural skip
+  on the meta-pack `security` — same as v0.5).
+* `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace
+  --locked`, `RUSTDOCFLAGS=-D warnings cargo doc --no-deps` all
+  clean.
+
+### Notes — what's still deferred
+
+* **Real-world findings tracker filled** remains user-driven (a
+  campaign action, not a code change). The new packs make the
+  campaign cheaper to run; running it is up to the operator.
+* **HTTP-specific torture mode** (mid-stream disconnects, proxy
+  502s) — not in v0.6, tracked for v0.7.
+* **Sequence-aware corpus seeding** — the v0.6 corpus stores
+  single-tool inputs only; seeding sequence runs from corpus is a
+  v0.7 candidate.
+
 ## v0.5.0 — 2026-05-01
 
 Three new commands targeting **bootstrap, observability, and reach**.

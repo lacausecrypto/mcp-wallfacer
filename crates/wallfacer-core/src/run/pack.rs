@@ -37,6 +37,10 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "authorization",
         include_str!("../../packs/authorization.yaml"),
     ),
+    (
+        "context-poisoning",
+        include_str!("../../packs/context-poisoning.yaml"),
+    ),
     ("error-shape", include_str!("../../packs/error-shape.yaml")),
     ("idempotency", include_str!("../../packs/idempotency.yaml")),
     (
@@ -50,6 +54,10 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
     (
         "large-payload",
         include_str!("../../packs/large-payload.yaml"),
+    ),
+    (
+        "mcp-spec-conformance",
+        include_str!("../../packs/mcp-spec-conformance.yaml"),
     ),
     ("pagination", include_str!("../../packs/pagination.yaml")),
     (

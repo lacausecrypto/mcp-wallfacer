@@ -8,6 +8,7 @@ pub mod corpus;
 pub mod coverage;
 pub mod differential;
 pub mod finding;
+pub mod fuzz_corpus;
 pub mod mutate;
 pub mod property;
 pub mod redact;
