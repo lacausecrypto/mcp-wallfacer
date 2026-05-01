@@ -8,8 +8,8 @@
 [![Crates.io downloads](https://img.shields.io/crates/d/mcp-wallfacer?style=flat&label=cargo%20downloads&color=blue)](https://crates.io/crates/mcp-wallfacer)
 [![npm](https://img.shields.io/npm/v/mcp-wallfacer?style=flat&logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/mcp-wallfacer)
 [![npm downloads](https://img.shields.io/npm/dt/mcp-wallfacer?style=flat&label=npm%20downloads&color=cb3837)](https://www.npmjs.com/package/mcp-wallfacer)
-[![PyPI](https://img.shields.io/pypi/v/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi&color=3775a9)](https://pypi.org/project/mcp-wallfacer/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-wallfacer?style=flat&label=pypi%20downloads&color=3775a9)](https://pypi.org/project/mcp-wallfacer/)
+[![PyPI](https://img.shields.io/pypi/v/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi&color=3775a9&cacheSeconds=60)](https://pypi.org/project/mcp-wallfacer/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-wallfacer?style=flat&label=pypi%20downloads&color=3775a9&cacheSeconds=300)](https://pypi.org/project/mcp-wallfacer/)
 
 [![docs.rs](https://img.shields.io/docsrs/wallfacer-core?style=flat&logo=docs.rs&label=docs.rs)](https://docs.rs/wallfacer-core)
 [![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-wallfacer/ci.yml?branch=main&style=flat&logo=github&label=CI)](https://github.com/lacausecrypto/mcp-wallfacer/actions/workflows/ci.yml)
@@ -71,7 +71,7 @@ Five canonical channels, one binary. Full details in [`docs/install.md`](docs/in
 | **GitHub release** | [download tarball](https://github.com/lacausecrypto/mcp-wallfacer/releases) | air-gapped servers, no toolchain |
 | **npm** | `npm install -g mcp-wallfacer` | TypeScript / Node MCP authors |
 | **pip** | `pip install mcp-wallfacer` | Python MCP authors |
-| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.4.3` | CI gating with caching |
+| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.6.0` | CI gating with caching |
 
 The npm and pip wrappers are thin launchers that download the matching prebuilt binary from the GitHub release at install / first-run time; the underlying CLI is byte-identical to a `cargo install` build of the same version. The crates.io package is `mcp-wallfacer`; the installed binary is `wallfacer`.
 
@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lacausecrypto/mcp-wallfacer@v0.4.3
+      - uses: lacausecrypto/mcp-wallfacer@v0.6.0
         with:
           pack-all: "true"          # or pack: "security\nstateful"
           config: wallfacer.toml
@@ -236,7 +236,9 @@ A parallel HTTP fixture lives at [`examples/python_server/server_http.py`](examp
 - **v0.2** ✅ — workspace hardening, full JSON Schema generation, plan layer, property DSL v2, robustness pass, DX & docs.
 - **v0.3** ✅ — embedded rule pack library (15 packs), `for_each_tool` directive, multi-pack composition, real-world validation methodology.
 - **v0.4** ✅ — sequence-aware property testing (`stateful`, `auth-flow` packs), HTTP transport CI-gated, distribution to npm + pip + GitHub Action Marketplace.
-- **v0.5** — coverage report (`wallfacer coverage` per-tool / per-pack matrix), HTML dashboard (`wallfacer report --html`), real-world findings tracker filled.
+- **v0.5** ✅ — `wallfacer suggest` (auto-detect which packs apply), `wallfacer coverage` (tool × pack matrix + `--strict` CI gate), `wallfacer report --html` (self-contained dashboard).
+- **v0.6** ✅ — stateful fuzzing with persistent corpus + 90/10 mutate-vs-random (`fuzz --corpus-feedback`), `mcp-spec-conformance` pack (validates the MCP wire-format itself), `context-poisoning` pack (detects malicious servers planting prompt injections), `$.tool.{name,description,annotations}` DSL extension.
+- **v0.7** — sequence-aware corpus seeding (mutate from corpus into multi-step sequences), HTTP-specific torture mode (mid-stream disconnects, proxy 502s), real-world findings tracker filled (campaign-driven).
 
 ## Contributing
 
