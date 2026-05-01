@@ -93,6 +93,27 @@ jobs:
         # `--workspace` was stabilised in cargo 1.81: cargo resolves the
         # crate dependency order itself (publishes wallfacer-core first,
         # waits for the index to refresh, then publishes mcp-wallfacer).
+        #
+        # The maintainer often publishes manually from the laptop right
+        # after tagging, which leaves this CI step racing the registry.
+        # Treat "already uploaded" as success so the Release workflow
+        # ends green when the version is already on crates.io. Any
+        # *other* publish failure still fails the job.
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace --locked
+        run: |
+          set -o pipefail
+          tmp=$(mktemp)
+          if cargo publish --workspace --locked 2>&1 | tee "$tmp"; then
+            exit 0
+          fi
+          # cargo prints both "already uploaded" (newer cargo) and
+          # "crate version `X` is already uploaded" / "already exists"
+          # (older variants). Any of these means the version is on the
+          # registry already; the Release page already has the
+          # binaries, so we surface a notice and exit 0.
+          if grep -qE 'already (uploaded|exists|published)' "$tmp"; then
+            echo "::notice::version already on crates.io — skipping publish"
+            exit 0
+          fi
+          exit 1
