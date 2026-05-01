@@ -88,11 +88,12 @@ pub struct Config {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DestructiveConfig {
     /// Regex patterns matched against tool names. Layered on top of the
-    /// built-in keyword detector unless [`replace_defaults`] is set.
+    /// built-in keyword detector unless [`Self::replace_defaults`] is
+    /// set.
     #[serde(default)]
     pub patterns: Vec<String>,
     /// When `true`, the default keyword detector is disabled and only
-    /// [`patterns`] decides which tools are destructive.
+    /// [`Self::patterns`] decides which tools are destructive.
     ///
     /// Default `false` is additive: an operator who adds one custom
     /// pattern still gets the protection from the built-in keywords
