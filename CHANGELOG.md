@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.4.3 — 2026-05-01
+
+Tooling-only patch — no functional change to the wallfacer CLI.
+
+### Fixed
+
+* **GitHub Marketplace publish.** The composite action's `name`
+  field was the bare `wallfacer`, which clashes with an existing
+  GitHub user / org / action and gets rejected by the Marketplace
+  validator. Renamed to `mcp-wallfacer` to match the crates.io,
+  npm, and pip package names. Consumers using
+  `uses: lacausecrypto/mcp-wallfacer@v0.4.3` are unaffected.
+* **Release workflow no longer fails on already-published versions.**
+  The previous `cargo publish --workspace --locked` step painted
+  the Release run red whenever the maintainer published manually
+  before CI got there. The step now grep's stderr for
+  `already (uploaded|exists|published)` and exits 0 on those
+  patterns; any other publish failure still fails the job.
+* **Action's default `version: v0.4.3`** so a fresh
+  `uses: lacausecrypto/mcp-wallfacer@main` pulls a real published
+  release.
+
 ## v0.4.2 — 2026-05-01
 
 Phase M: **HTTP / Streamable transport gated in CI**. v0.3 already
