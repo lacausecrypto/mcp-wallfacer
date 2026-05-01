@@ -4,11 +4,11 @@
 
 **Runtime fuzzing & invariant testing for MCP servers — catch crashes, hangs, schema drift, race conditions, and state leaks before they ship.**
 
-[![Crates.io](https://img.shields.io/crates/v/mcp-wallfacer?style=flat&logo=rust&label=crates.io&color=informational)](https://crates.io/crates/mcp-wallfacer)
-[![Crates.io downloads](https://img.shields.io/crates/d/mcp-wallfacer?style=flat&label=cargo%20downloads&color=blue)](https://crates.io/crates/mcp-wallfacer)
-[![npm](https://img.shields.io/npm/v/mcp-wallfacer?style=flat&logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/mcp-wallfacer)
-[![npm downloads](https://img.shields.io/npm/dt/mcp-wallfacer?style=flat&label=npm%20downloads&color=cb3837)](https://www.npmjs.com/package/mcp-wallfacer)
-[![PyPI](https://img.shields.io/pypi/v/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi&color=3775a9&cacheSeconds=60)](https://pypi.org/project/mcp-wallfacer/)
+[![Crates.io](https://img.shields.io/crates/v/mcp-wallfacer?style=flat&logo=rust&label=crates.io&color=informational&cacheSeconds=300)](https://crates.io/crates/mcp-wallfacer)
+[![Crates.io downloads](https://img.shields.io/crates/d/mcp-wallfacer?style=flat&label=cargo%20downloads&color=blue&cacheSeconds=300)](https://crates.io/crates/mcp-wallfacer)
+[![npm](https://img.shields.io/npm/v/mcp-wallfacer?style=flat&logo=npm&label=npm&color=cb3837&cacheSeconds=300)](https://www.npmjs.com/package/mcp-wallfacer)
+[![npm downloads](https://img.shields.io/npm/dt/mcp-wallfacer?style=flat&label=npm%20downloads&color=cb3837&cacheSeconds=300)](https://www.npmjs.com/package/mcp-wallfacer)
+[![PyPI](https://img.shields.io/pypi/v/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi&color=3775a9&cacheSeconds=300)](https://pypi.org/project/mcp-wallfacer/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/mcp-wallfacer?style=flat&label=pypi%20downloads&color=3775a9&cacheSeconds=300)](https://pypi.org/project/mcp-wallfacer/)
 
 [![docs.rs](https://img.shields.io/docsrs/wallfacer-core?style=flat&logo=docs.rs&label=docs.rs)](https://docs.rs/wallfacer-core)
