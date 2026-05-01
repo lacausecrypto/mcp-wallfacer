@@ -1,0 +1,62 @@
+name: Publish to PyPI
+
+# Builds the pip wrapper and uploads the resulting sdist + wheel to
+# PyPI using Trusted Publishing (OIDC). No API token is needed in
+# the repo: PyPI verifies the workflow's GitHub OIDC identity
+# against the pending publisher you registered at
+# https://pypi.org/manage/account/publishing/.
+#
+# Triggers on tag push (v*) so each Rust release also publishes the
+# matching pip wrapper version. The wrapper's pyproject.toml version
+# must match the git tag — `bump-version.sh` (or manual edits) keep
+# them in sync.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write    # required for PyPI Trusted Publishing OIDC
+
+jobs:
+  build-and-publish:
+    name: Build wheel + publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      # Must match the environment name registered on PyPI's
+      # Trusted Publisher form (`pypi`). The environment can stay
+      # empty in repo settings — it's a scoping mechanism, not a
+      # secret store.
+      name: pypi
+      url: https://pypi.org/p/mcp-wallfacer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify wrapper version matches the git tag
+        working-directory: pip
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          declared=$(grep -E '^version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$tag" != "$declared" ]; then
+            echo "::error::tag $tag does not match pip/pyproject.toml version $declared"
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        working-directory: pip
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pip/dist/
