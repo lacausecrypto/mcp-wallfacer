@@ -36,14 +36,8 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "authorization",
         include_str!("../../packs/authorization.yaml"),
     ),
-    (
-        "error-shape",
-        include_str!("../../packs/error-shape.yaml"),
-    ),
-    (
-        "idempotency",
-        include_str!("../../packs/idempotency.yaml"),
-    ),
+    ("error-shape", include_str!("../../packs/error-shape.yaml")),
+    ("idempotency", include_str!("../../packs/idempotency.yaml")),
     (
         "injection-shell",
         include_str!("../../packs/injection-shell.yaml"),
@@ -56,10 +50,7 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "large-payload",
         include_str!("../../packs/large-payload.yaml"),
     ),
-    (
-        "pagination",
-        include_str!("../../packs/pagination.yaml"),
-    ),
+    ("pagination", include_str!("../../packs/pagination.yaml")),
     (
         "path-traversal",
         include_str!("../../packs/path-traversal.yaml"),
@@ -68,10 +59,7 @@ pub const EMBEDDED_PACKS: &[(&str, &str)] = &[
         "prompt-injection",
         include_str!("../../packs/prompt-injection.yaml"),
     ),
-    (
-        "rate-limit",
-        include_str!("../../packs/rate-limit.yaml"),
-    ),
+    ("rate-limit", include_str!("../../packs/rate-limit.yaml")),
     (
         "secrets-leakage",
         include_str!("../../packs/secrets-leakage.yaml"),
