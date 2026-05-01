@@ -64,9 +64,9 @@ v0.8.1 dedups via `BTreeSet` — one entry per blocked tool.
 ### Misc
 
 * CI typos check now allowlists `crates/wallfacer-core/packs/prompt-injection*.yaml`
-  so multilingual + zero-width payloads (Spanish "Ignora", German
-  "alle"/"deine", Turkish "sistem", zero-width-split "Ig​nore")
-  don't trip the spellchecker.
+  so multilingual (Spanish / German / Turkish / Japanese / Chinese /
+  Arabic / Russian) and zero-width-character payloads don't trip
+  the spellchecker — they're the test corpus by design.
 * `corpus minimize --replay` stderr label now reads
   `using per-invariant predicate '<name>'` instead of the misleading
   `kind=AnyNonOk`.
