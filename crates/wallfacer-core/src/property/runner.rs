@@ -292,9 +292,9 @@ fn evaluate_for_each(path: &str, assertions: &[Assertion], context: &Value) -> R
     let nodes = jsonpath::resolve(context, path)?;
     if nodes.is_empty() {
         // `for_each` over an empty set is vacuously true. Emit a warning
-        // so an author who typo'd a path (e.g. `$.respnse.items[*]`)
-        // doesn't ship an invariant that silently always passes. Run
-        // `wallfacer property -v` to see this.
+        // so an author who fat-fingered a JSONPath does not ship an
+        // invariant that silently always passes. Run `wallfacer property
+        // -v` to see this.
         warn!(
             jsonpath = path,
             "for_each path matched zero nodes; the assertion is vacuously true. \
