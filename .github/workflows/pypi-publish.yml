@@ -39,7 +39,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify wrapper version matches the git tag
+      - name: Verify wrapper version matches the git tag (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: pip
         shell: bash
         run: |
