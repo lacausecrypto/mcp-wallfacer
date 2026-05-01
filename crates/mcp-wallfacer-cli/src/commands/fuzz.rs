@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use wallfacer_core::{
     client::Client,
     corpus::Corpus,
-    finding::Finding,
+    finding::{Finding, FindingKind},
     fuzz_corpus::FuzzCorpus,
     mutate::GenMode,
     run::{DestructiveDetector, FuzzPlan, Reporter},
@@ -240,40 +240,87 @@ struct AggregateReport {
 
 #[derive(Serialize)]
 struct AggregateEntry {
-    /// `Finding::id` — stable hash of (tool, kind, repro). Findings
-    /// with the same id across runs are the same logical bug.
-    id: String,
+    /// Bucket key — `(tool, kind_keyword, invariant_or_step_name)`,
+    /// hashed into one stable string. v0.8.1 widened this from
+    /// `Finding::id` (which hashes the full input) so that fuzz
+    /// findings with mutated payloads can still merge into the
+    /// same bucket. Inputs differ → ids differ → without this they
+    /// were always tagged `one-shot`, even for transport-level
+    /// bugs that fire on every payload.
+    bucket: String,
     tool: String,
     kind: String,
+    /// Number of distinct `Finding::id`s grouped into this bucket.
+    /// Useful for sanity-checking: a deterministic crash bucket
+    /// should have `unique_inputs == 1`; a transport flake will
+    /// have `unique_inputs == occurrences`.
+    unique_inputs: u32,
     occurrences: u32,
     /// `stable` (occurrences == runs), `flaky` (1 < occurrences <
     /// runs), or `one-shot` (occurrences == 1).
     label: &'static str,
     /// First instance seen. Carries the seed that triggered it,
-    /// so `wallfacer corpus replay <id>` reproduces.
+    /// so `wallfacer corpus replay <sample.id>` reproduces.
     sample: Finding,
 }
 
+/// v0.8.1 — aggregation key. Identifies a *logical* bug class
+/// rather than a single (input, response) pair:
+/// - tool name
+/// - kind keyword (`crash`, `hang`, `protocol_error`, ...)
+/// - for property/sequence findings, the invariant / sequence
+///   name; otherwise empty
+///
+/// Coarser than `Finding::id` (which also hashes the input) but
+/// matches what an operator actually wants to know: did the same
+/// invariant fail across N runs, regardless of what payload
+/// triggered it each time.
+fn bucket_key(finding: &Finding) -> String {
+    let kind_detail: &str = match &finding.kind {
+        FindingKind::PropertyFailure { invariant } => invariant,
+        FindingKind::SequenceFailure { sequence, .. } => sequence,
+        _ => "",
+    };
+    format!(
+        "{}|{}|{}",
+        finding.tool,
+        finding.kind.keyword(),
+        kind_detail
+    )
+}
+
 fn aggregate_findings(runs: u32, all: &[(u32, Finding)]) -> AggregateReport {
-    // Group by Finding::id. Track which run indices saw each id so
-    // the same finding firing twice in one run still counts as one
-    // observation toward the stable/flaky split.
-    let mut groups: BTreeMap<String, (Finding, std::collections::BTreeSet<u32>)> = BTreeMap::new();
+    // Group by `bucket_key` so the same logical bug across N runs
+    // collapses to one entry — even when the input mutated. Track
+    // which run indices saw each bucket and which distinct
+    // Finding::ids fell into it.
+    let mut groups: BTreeMap<
+        String,
+        (
+            Finding,
+            std::collections::BTreeSet<u32>,
+            std::collections::BTreeSet<String>,
+        ),
+    > = BTreeMap::new();
     for (run_index, finding) in all {
+        let key = bucket_key(finding);
         groups
-            .entry(finding.id.clone())
-            .and_modify(|(_, runs_seen)| {
+            .entry(key)
+            .and_modify(|(_, runs_seen, ids_seen)| {
                 runs_seen.insert(*run_index);
+                ids_seen.insert(finding.id.clone());
             })
             .or_insert_with(|| {
-                let mut set = std::collections::BTreeSet::new();
-                set.insert(*run_index);
-                (finding.clone(), set)
+                let mut runs = std::collections::BTreeSet::new();
+                runs.insert(*run_index);
+                let mut ids = std::collections::BTreeSet::new();
+                ids.insert(finding.id.clone());
+                (finding.clone(), runs, ids)
             });
     }
     let mut entries: Vec<AggregateEntry> = groups
         .into_iter()
-        .map(|(id, (sample, runs_seen))| {
+        .map(|(bucket, (sample, runs_seen, ids_seen))| {
             let occurrences = runs_seen.len() as u32;
             let label = if occurrences == runs {
                 "stable"
@@ -283,9 +330,10 @@ fn aggregate_findings(runs: u32, all: &[(u32, Finding)]) -> AggregateReport {
                 "flaky"
             };
             AggregateEntry {
-                id,
+                bucket,
                 tool: sample.tool.clone(),
                 kind: sample.kind.keyword().to_string(),
+                unique_inputs: ids_seen.len() as u32,
                 occurrences,
                 label,
                 sample,
@@ -319,9 +367,20 @@ fn print_aggregate_human(report: &AggregateReport) {
         return;
     }
     for entry in &report.aggregate {
+        let inputs_note = if entry.unique_inputs > 1 {
+            format!(", {} distinct inputs", entry.unique_inputs)
+        } else {
+            String::new()
+        };
         println!(
-            "  [{}] {} {} ({}/{}) — id={}",
-            entry.label, entry.tool, entry.kind, entry.occurrences, report.runs, entry.id
+            "  [{}] {} {} ({}/{} runs{}) \u{2014} sample id={}",
+            entry.label,
+            entry.tool,
+            entry.kind,
+            entry.occurrences,
+            report.runs,
+            inputs_note,
+            entry.sample.id
         );
     }
 }

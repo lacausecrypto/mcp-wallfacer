@@ -1,6 +1,6 @@
 {
   "name": "mcp-wallfacer",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Runtime fuzzing and invariant-testing harness for MCP servers — catch crashes, hangs, schema drift, and state leaks before they ship.",
   "keywords": [
     "mcp",

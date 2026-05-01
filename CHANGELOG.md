@@ -4,6 +4,75 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## v0.8.1 — 2026-05-01
+
+Patch release fixing four issues found by a self-audit + battle-test
+of v0.8.0 against the example fixture and the HTTP fault server.
+
+### Fixed — `corpus minimize --replay` could not shrink any property failure
+
+`PropertyFailure` findings against well-behaved servers (the common
+case for `prompt-injection`, `secrets-leakage`, `context-poisoning`,
+`mcp-spec-conformance`, `tool-annotations`) come back as
+`CallOutcome::Ok(...)` with the failure encoded in the response
+content, not the transport layer. The v0.8 default predicate
+(`ShrinkTargetKind::AnyNonOk`) refused to reproduce on `Ok`, so
+shrinking quit at step 0 with `100% of original`.
+
+v0.8.1 auto-engages the per-invariant predicate when `--invariants`
+isn't supplied: the embedded packs are scanned for an invariant whose
+name matches the finding's `kind.invariant`, and that invariant's
+assertions become the predicate. Falls back to the v0.8 transport
+classifier only when no embedded pack contains a matching invariant
+(prompts the operator to pass `--invariants <path>` for workspace
+packs).
+
+### Fixed — flakiness aggregator tagged every fuzz finding `one-shot`
+
+`fuzz --runs N --aggregate` grouped findings by `Finding::id`, which
+hashes the *full input*. Fuzz mutates input every iteration → every
+run produced different ids → the same root-cause bug got fragmented
+into N separate one-shots instead of one stable bucket. Empirically
+`crashes_now` (deterministically crashes on every input) was tagged
+`flaky 3/4 + one-shot 1/4` instead of the obvious `stable 4/4`.
+
+v0.8.1 buckets by `(tool, kind_keyword, invariant_or_sequence_name)`
+— coarser than the input-sensitive `Finding::id`, matching what
+operators actually want to know ("did the same invariant fail across
+N runs"). Each entry now exposes `unique_inputs` so transport-flake
+buckets (every payload triggers it) are still distinguishable from
+input-specific buckets (same single payload triggers it).
+
+### Fixed — `--max-tools 0` and zero-match `--include` patterns silently passed
+
+`property --max-tools 0` was accepted, produced an empty live tool
+set, ran zero invariants, exited 0. A CI gate waiting for findings
+silently passed when nothing was actually tested.
+
+v0.8.1 rejects `--max-tools 0` with a clear error. `--include`
+patterns that match no live tool now print a warning to stderr
+listing the actual tool names. Packs that are `for_each_tool`-only
+bail with an explicit "every server tool was filtered out" error
+when filters narrow the set to nothing.
+
+### Fixed — duplicate entries in the blocked-tool list
+
+If 10 invariants in a pack targeted the same destructive tool, the
+human reporter rendered the tool name 10× in the blocked list.
+v0.8.1 dedups via `BTreeSet` — one entry per blocked tool.
+
+### Misc
+
+* CI typos check now allowlists `crates/wallfacer-core/packs/prompt-injection*.yaml`
+  so multilingual + zero-width payloads (Spanish "Ignora", German
+  "alle"/"deine", Turkish "sistem", zero-width-split "Ig​nore")
+  don't trip the spellchecker.
+* `corpus minimize --replay` stderr label now reads
+  `using per-invariant predicate '<name>'` instead of the misleading
+  `kind=AnyNonOk`.
+
+---
+
 ## v0.8.0 — 2026-05-01
 
 Theme: **scaling to large servers + per-finding signal quality.**

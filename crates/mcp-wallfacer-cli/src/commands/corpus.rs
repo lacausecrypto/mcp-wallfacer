@@ -12,8 +12,12 @@ use wallfacer_core::{
     client::{CallOutcome, Client},
     corpus::Corpus,
     finding::{Finding, FindingKind},
-    property::{dsl, runner},
+    property::{
+        dsl::{self, Invariant},
+        runner,
+    },
     redact::REDACTED_PLACEHOLDER,
+    run::EMBEDDED_PACKS,
     target::{default_corpus_dir, Config},
 };
 
@@ -246,6 +250,35 @@ async fn minimize(
             );
             None
         }
+        // v0.8.1 — when the finding is a PropertyFailure and the
+        // user didn't pass --invariants, auto-engage the per-invariant
+        // predicate by scanning every embedded pack for one whose
+        // invariant name matches the finding. This was a v0.8 silent
+        // footgun: the AnyNonOk fallback can't make progress when
+        // the server returns `Ok` (which is most property packs:
+        // prompt-injection, secrets-leakage, etc), so without the
+        // per-invariant predicate the shrinker reports "100 % of
+        // original" on every property finding.
+        (None, FindingKind::PropertyFailure { invariant: name }) => {
+            match find_invariant_in_embedded_packs(name) {
+                Some(found) => {
+                    eprintln!(
+                        "note: auto-loaded invariant `{name}` from embedded packs. \
+                         Pass --invariants <path> to point at a custom YAML."
+                    );
+                    Some(found)
+                }
+                None => {
+                    eprintln!(
+                        "note: invariant `{name}` not found in embedded packs. \
+                         Falling back to the coarse transport-level predicate, which \
+                         cannot shrink property failures whose response was `Ok`. \
+                         Re-run with --invariants <path> to use the exact assertions."
+                    );
+                    None
+                }
+            }
+        }
         (None, _) => None,
     };
 
@@ -256,14 +289,15 @@ async fn minimize(
         .await
         .with_context(|| "failed to connect to MCP target for replay-based shrink")?;
 
-    eprintln!(
-        "shrinking finding `{id}` (tool=`{tool}`, kind={:?}) — each trial is one tool call against the target{}",
-        target_kind,
-        if invariant.is_some() {
-            " (per-invariant predicate)"
-        } else {
-            ""
+    let predicate_label = match (&invariant, &finding.kind) {
+        (Some(inv), _) => format!("per-invariant predicate `{}`", inv.name),
+        (None, FindingKind::PropertyFailure { .. }) => {
+            "loose AnyNonOk predicate (no invariant loaded \u{2014} progress unlikely)".to_string()
         }
+        (None, _) => format!("{target_kind:?} predicate"),
+    };
+    eprintln!(
+        "shrinking finding `{id}` (tool=`{tool}`) using {predicate_label} \u{2014} each trial is one tool call against the target"
     );
 
     // For per-invariant shrinking we need the live tool's
@@ -318,6 +352,26 @@ async fn minimize(
     );
     println!("{}", serde_json::to_string_pretty(&result.minimised)?);
     Ok(())
+}
+
+/// v0.8.1 — locate an invariant by name across every embedded pack.
+/// Used by `corpus minimize --replay` to auto-engage the per-invariant
+/// predicate when the user didn't pass `--invariants <path>`. Each
+/// pack is parsed with default parameters; that's the same source the
+/// running pack saw when the finding was produced, so the assertions
+/// match. Returns `None` if no embedded pack contains an invariant
+/// with the given name (custom workspace pack — caller falls back to
+/// asking for `--invariants` explicitly).
+fn find_invariant_in_embedded_packs(name: &str) -> Option<Invariant> {
+    for (_pack_name, source) in EMBEDDED_PACKS {
+        let Ok(file) = dsl::parse(source) else {
+            continue;
+        };
+        if let Some(found) = file.invariants.iter().find(|i| i.name == name) {
+            return Some(found.clone());
+        }
+    }
+    None
 }
 
 /// Phase AC.1 — mirrors the response shape `PropertyPlan::execute`

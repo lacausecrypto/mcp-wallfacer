@@ -18,4 +18,9 @@ extend-exclude = [
     "out.sarif",
     ".wallfacer/**",
     "target/**",
+    # The prompt-injection packs ship intentional multilingual + zero-
+    # width + encoded payloads. Spanish "Ignora", German "alle / deine",
+    # Turkish "sistem", and zero-width-split "Ig​nore" all read as
+    # English typos to the spellchecker but are the test corpus by design.
+    "crates/wallfacer-core/packs/prompt-injection*.yaml",
 ]

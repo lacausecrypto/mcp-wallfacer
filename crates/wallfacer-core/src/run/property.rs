@@ -119,11 +119,10 @@ impl PropertyPlan {
         //
         // Phase AA (v0.8) — apply the operator's `--include` /
         // `--exclude` globs and `--max-tools` cap *before* expansion
-        // so for_each_tool blocks fan out only across the kept set.
-        // The destructive classifier (below) still sees the FULL
-        // list because we want it to flag a destructive tool that
-        // the operator filtered in via include/exclude — same
-        // behaviour the fuzz command had since v0.2.
+        // so `for_each_tool` blocks fan out only across the kept
+        // set. Tools the operator filtered out simply do not have
+        // invariants generated for them; the destructive classifier
+        // below still runs against every kept tool.
         let all_live_tools = client
             .list_tools()
             .await
@@ -135,6 +134,26 @@ impl PropertyPlan {
             self.max_tools,
         )
         .context("invalid include/exclude glob in property plan")?;
+        // v0.8.1 — surface the case where include/exclude/max-tools
+        // narrowed the live set to nothing AND the file's only
+        // invariants are for_each_tool blocks. Without this, the
+        // run reports "0 findings" with exit 0 — a CI gate waiting
+        // for findings silently passes when nothing was actually
+        // tested. The static `invariants:` list still runs (the
+        // filter only applies to `for_each_tool` expansion), so
+        // this only fires when the pack is for_each_tool-only.
+        if live_tools.is_empty()
+            && !all_live_tools.is_empty()
+            && self.file.invariants.is_empty()
+            && !self.file.for_each_tool.is_empty()
+        {
+            bail!(
+                "every server tool was filtered out by --include / --exclude / --max-tools, \
+                 and the pack has no static invariants — nothing would run. Adjust the \
+                 filters, or pass --invariants <path> to a pack with static `invariants:` \
+                 entries."
+            );
+        }
         let mut all_invariants = self.file.invariants.clone();
         if !self.file.for_each_tool.is_empty() {
             let expanded =
@@ -151,7 +170,10 @@ impl PropertyPlan {
             .map(|tool| (tool.name.to_string(), tool))
             .collect();
 
-        let mut blocked = Vec::new();
+        // v0.8.1 — dedup `blocked` so the reporter doesn't render
+        // the same destructive tool name N times when N invariants
+        // happen to target it.
+        let mut blocked_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut missing_tools = Vec::new();
         let runnable_invariants: Vec<dsl::Invariant> = all_invariants
             .into_iter()
@@ -159,7 +181,7 @@ impl PropertyPlan {
                 Some(tool) => {
                     let runnable = self.detector.classify(tool).is_runnable();
                     if !runnable {
-                        blocked.push(invariant.tool.clone());
+                        blocked_set.insert(invariant.tool.clone());
                     }
                     runnable
                 }
@@ -178,6 +200,7 @@ impl PropertyPlan {
             })
             .collect();
 
+        let blocked: Vec<String> = blocked_set.into_iter().collect();
         let total_cases: u64 = runnable_invariants
             .iter()
             .map(|invariant| invariant.cases.unwrap_or(self.default_cases).max(1) as u64)
@@ -337,6 +360,13 @@ fn apply_tool_filters(
     excludes: &[String],
     max_tools: Option<usize>,
 ) -> Result<Vec<rmcp::model::Tool>> {
+    // v0.8.1 — `--max-tools 0` is almost always a typo for
+    // `--max-tools <something>` and produces an empty live set.
+    // Refuse it explicitly so the operator gets a clear error
+    // instead of a quietly-passing CI gate.
+    if matches!(max_tools, Some(0)) {
+        bail!("--max-tools must be at least 1");
+    }
     for pattern in includes.iter().chain(excludes.iter()) {
         glob::compile(pattern).with_context(|| format!("invalid glob pattern `{pattern}`"))?;
     }
@@ -345,6 +375,19 @@ fn apply_tool_filters(
         .filter(|tool| glob::matches_filters(tool.name.as_ref(), includes, excludes))
         .cloned()
         .collect();
+    // v0.8.1 — if the operator passed --include patterns and none
+    // of them matched any live tool, that's almost certainly a
+    // typo (`--include cras` for a tool actually called `crash`).
+    // Warn loudly so the operator notices before the run reports
+    // "0 findings" and exits 0.
+    if !includes.is_empty() && !tools.is_empty() && filtered.is_empty() {
+        eprintln!(
+            "warning: --include patterns {includes:?} matched zero of the {} tools the server \
+             advertised. Check for typos; existing tool names: {:?}",
+            tools.len(),
+            tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
     if let Some(cap) = max_tools {
         filtered.truncate(cap);
     }
@@ -427,6 +470,16 @@ mod tests {
         let err =
             apply_tool_filters(&tools, &["[unterminated".to_string()], &[], None).unwrap_err();
         assert!(err.to_string().contains("invalid glob pattern"));
+    }
+
+    #[test]
+    fn max_tools_zero_is_rejected() {
+        // v0.8.1 — `--max-tools 0` was silently accepted in v0.8,
+        // producing an empty live set and a CI gate that quietly
+        // exits 0. Reject it explicitly.
+        let tools = vec![tool("a"), tool("b")];
+        let err = apply_tool_filters(&tools, &[], &[], Some(0)).unwrap_err();
+        assert!(err.to_string().contains("--max-tools must be at least 1"));
     }
 
     #[test]
