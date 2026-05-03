@@ -9,6 +9,8 @@
 [![PyPI](https://img.shields.io/pypi/v/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi&color=3775a9&cacheSeconds=300)](https://pypi.org/project/mcp-wallfacer/)
 
 [![Crates.io downloads](https://img.shields.io/crates/d/mcp-wallfacer?style=flat&logo=rust&logoColor=white&label=cargo%20downloads&color=dea584&cacheSeconds=300)](https://crates.io/crates/mcp-wallfacer)
+[![npm downloads](https://img.shields.io/npm/dt/mcp-wallfacer?style=flat&logo=npm&logoColor=white&label=npm%20downloads&color=cb3837&cacheSeconds=300)](https://www.npmjs.com/package/mcp-wallfacer)
+[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-wallfacer?style=flat&logo=pypi&logoColor=white&label=pypi%20downloads%2Fmonth&color=3775a9&cacheSeconds=300)](https://pypistats.org/packages/mcp-wallfacer)
 
 [![docs.rs](https://img.shields.io/docsrs/wallfacer-core?style=flat&logo=docs.rs&label=docs.rs)](https://docs.rs/wallfacer-core)
 [![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-wallfacer/ci.yml?branch=main&style=flat&logo=github&label=CI)](https://github.com/lacausecrypto/mcp-wallfacer/actions/workflows/ci.yml)
