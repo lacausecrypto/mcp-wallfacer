@@ -81,7 +81,19 @@ NETWORK_MARKERS = re.compile(
     r"Name or service not known|Temporary failure in name resolution|connection issue",
     re.I,
 )
+# The server lacks something only a real deployment provides: a CLI it
+# shells out to, credentials, a browser binary, a config file.
+ENV_MARKERS = re.compile(
+    r"spawn(?:Sync)? \S+ ENOENT|command not found|credentials? (?:not found|missing)|"
+    r"Could not find (?:Chrome|Chromium|browser|expected browser)|Executable doesn't exist|"
+    r"not (?:authenticated|logged in)|Please (?:log ?in|authenticate)|"
+    r"API[_ ]?key (?:is )?(?:required|missing|not set)|No such file or directory \(os error 2\)",
+    re.I,
+)
 READBUFFER_MARKER = "ReadBuffer exceeded maximum size"
+# Tools probed per server (`--max-tools`): the denominator when deciding
+# whether a server hangs on (nearly) everything.
+MAX_TOOLS_DEFAULT = 25
 # TS SDK stdio transports close the session on any inbound message > 10 MiB
 # (modelcontextprotocol/typescript-sdk#2775, #2793): a crash on such a payload
 # is that one known SDK behaviour, not a per-server bug.
@@ -175,6 +187,11 @@ def server_cmd(slug: str, entry: Dict[str, Any]) -> List[str]:
         "HOME=/tmp",
         "-e",
         "WF_MAX_SECS=900",
+        # Forward wallfacer's canary secret (set in this process's env by
+        # the stdio client) into the container, so a server disclosing
+        # its environment is caught as `secret_leak`.
+        "-e",
+        "WALLFACER_CANARY_SECRET",
         "-w",
         "/tmp",
         "-v",
@@ -531,10 +548,11 @@ def classify_fuzz(item: Dict[str, Any], server_err: str) -> str:
         return "known:ts-sdk-readbuffer"
     if kind == "hang" and NETWORK_MARKERS.search(server_err):
         return "env:network-sandbox"
-    if kind == "internal_error" and NETWORK_MARKERS.search(
-        str(item.get("sample", {}).get("details", ""))
-    ):
+    details = str(item.get("sample", {}).get("details", ""))
+    if kind == "internal_error" and NETWORK_MARKERS.search(details):
         return "env:network-sandbox"
+    if kind == "internal_error" and ENV_MARKERS.search(details):
+        return "env:missing-dependency"
     if item.get("label") != "stable":
         return "noise:" + str(item.get("label"))
     return "candidate"
@@ -597,6 +615,8 @@ def report() -> None:
                         cls = "env:network-sandbox"
                     elif k["type"] == "internal_error" and NETWORK_MARKERS.search(f.get("details", "")):
                         cls = "env:network-sandbox"
+                    elif k["type"] == "internal_error" and ENV_MARKERS.search(f.get("details", "")):
+                        cls = "env:missing-dependency"
                     row["property"].append(
                         {
                             "tool": f["tool"],
@@ -608,6 +628,15 @@ def report() -> None:
                     )
             except json.JSONDecodeError:
                 pass
+        # A server that hangs on (nearly) every tool is waiting on
+        # something the sandbox doesn't provide (login, network, a
+        # daemon), not failing per tool.
+        hung = {x["tool"] for x in row["fuzz"] + row["property"] if x.get("kind", x.get("type")) == "hang"}
+        probed = min(row["tool_count"] or 0, MAX_TOOLS_DEFAULT)
+        if len(hung) >= max(3, 0.8 * probed):
+            for x in row["fuzz"] + row["property"]:
+                if x.get("kind", x.get("type")) == "hang" and x["class"] in ("candidate", "noise:stable"):
+                    x["class"] = "env:unresponsive-server"
         rows.append(row)
 
     (RUNS / "summary.json").write_text(json.dumps(rows, indent=1))
@@ -652,7 +681,7 @@ def main() -> None:
     ap.add_argument("--fuzz-runs", type=int, default=3)
     ap.add_argument("--iterations", type=int, default=30)
     ap.add_argument("--cases", type=int, default=20)
-    ap.add_argument("--max-tools", type=int, default=25)
+    ap.add_argument("--max-tools", type=int, default=MAX_TOOLS_DEFAULT)
     a = ap.parse_args()
     if a.stage == "report":
         report()
