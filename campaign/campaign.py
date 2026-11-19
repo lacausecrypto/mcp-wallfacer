@@ -6,6 +6,10 @@ Stages (state in campaign/runs/<slug>/state.json, resumable):
             (network ON), scan it with wallfacer (server in a container with
             --network none, 1 GiB, 1 CPU, no host mounts), then delete the
             install. Disk use is bounded by --jobs installs at a time.
+  retry   — for targets that ended no_start / error: reinstall, probe the
+            handshake with common subcommands (stdio, mcp, serve…) and dummy
+            values for env vars the server asks for, classify stdout pollution,
+            and scan with the launch that works
   report  — aggregate every target into runs/summary.json + runs/summary.md
 
 Targets: runs/targets.json = [{"slug", "eco": "npm"|"pypi", "pkg", "downloads"}].
@@ -23,6 +27,9 @@ import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Fuzz outputs embed deeply nested generated arrays; json.loads recurses per level.
+sys.setrecursionlimit(100_000)
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -87,6 +94,15 @@ def is_readbuffer_crash(kind: str, tool_call: Any, server_err: str) -> bool:
     )
 
 
+class DockerUnreachable(BaseException):
+    """Raised when the Docker daemon can't be reached. Derives from
+    BaseException so per-target `except Exception` handlers don't record it as
+    a target result: the run aborts and the target stays resumable."""
+
+
+DOCKER_DOWN = "Cannot connect to the Docker daemon"
+
+
 def sh(
     cmd: List[str],
     timeout: int,
@@ -98,6 +114,8 @@ def sh(
         p = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, input=stdin
         )
+        if DOCKER_DOWN in p.stderr:
+            raise DockerUnreachable(p.stderr[-300:])
         return {
             "rc": p.returncode,
             "out": p.stdout,
@@ -133,7 +151,8 @@ def write_state(t: Dict[str, Any], state: Dict[str, Any]) -> None:
 
 
 def server_cmd(slug: str, entry: Dict[str, Any]) -> List[str]:
-    return [
+    return (
+        [
         "docker",
         "run",
         "-i",
@@ -141,7 +160,7 @@ def server_cmd(slug: str, entry: Dict[str, Any]) -> List[str]:
         "--network",
         "none",
         "--memory",
-        "1g",
+        "768m",
         "--cpus",
         "1",
         "--pids-limit",
@@ -160,9 +179,12 @@ def server_cmd(slug: str, entry: Dict[str, Any]) -> List[str]:
         "/tmp",
         "-v",
         f"{VOLUME}:/pkgs:ro",
-        IMAGE,
-        "wf-guard",
-    ] + entry["cmd"]
+    ]
+    + sum((["-e", f"{k}={v}"] for k, v in entry.get("env", {}).items()), [])
+    + [IMAGE, "wf-guard"]
+    + entry["cmd"]
+    + entry.get("args", [])
+    )
 
 
 def cleanup(slug: str) -> None:
@@ -342,6 +364,7 @@ def process(t: Dict[str, Any], a: argparse.Namespace) -> str:
         return "cached:" + st.get("scan", {}).get(
             "status", st.get("install", {}).get("ok") and "?" or "install_fail"
         )
+    aborted = False
     try:
         st["install"] = install(t)
         if not st["install"]["ok"]:
@@ -354,8 +377,147 @@ def process(t: Dict[str, Any], a: argparse.Namespace) -> str:
         st["error"] = f"{type(e).__name__}: {e}"
         st["done"] = True
         return f"error({st['error'][:120]})"
+    except DockerUnreachable:
+        aborted = True
+        raise
     finally:
-        cleanup(t["slug"])
+        if not aborted:
+            cleanup(t["slug"])
+            st["wallfacer"] = a.wallfacer_version
+            write_state(t, st)
+
+
+# ---------------------------------------------------------------- retry
+
+# Handshake probe run inside the sandbox: sends `initialize`, reports whether a
+# JSON-RPC result came back and which non-protocol lines hit stdout first.
+PROBE_JS = r"""
+const { spawn } = require("child_process");
+const cmd = JSON.parse(process.argv[1]);
+const p = spawn(cmd[0], cmd.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+let buf = "", err = "", junk = [], ok = false, done = false;
+const finish = (why) => {
+  if (done) return; done = true;
+  console.log("WFPROBE" + JSON.stringify({ ok, why, junk: junk.slice(0, 5), stderr: err.slice(-3000), exit: p.exitCode }));
+  try { p.kill("SIGKILL"); } catch {}
+  process.exit(0);
+};
+p.stdout.on("data", (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+    if (!line) continue;
+    let m = null; try { m = JSON.parse(line); } catch {}
+    if (m && m.jsonrpc === "2.0") { if (m.id === 0 && m.result) { ok = true; finish("initialized"); } }
+    else junk.push(line.slice(0, 200));
+  }
+});
+p.stderr.on("data", (d) => { err = (err + d).slice(-20000); });
+p.on("error", (e) => { err += String(e); finish("spawn_error"); });
+p.on("exit", () => setTimeout(() => finish("exited"), 300));
+p.stdin.on("error", () => {});
+p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize",
+  params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "wf-probe", version: "0" } } }) + "\n");
+setTimeout(() => finish("timeout"), 15000);
+"""
+
+ARG_VARIANTS: List[List[str]] = [
+    [], ["stdio"], ["mcp"], ["serve"], ["start"], ["server"], ["--stdio"],
+    ["mcp", "start"], ["mcp", "serve"], ["serve", "--stdio"], ["--transport", "stdio"],
+]
+
+# Env var names a server asks for on stderr when it refuses to start.
+ENV_NAME = re.compile(
+    r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|KEY|TOKEN|SECRET|URL|URI|HOST|DSN|ENDPOINT|"
+    r"DOMAIN|PROJECT|PROJECT_ID|WORKSPACE|ORG|USER|USERNAME|EMAIL|REGION|ID|PASSWORD|PATH))\b"
+)
+
+
+def dummy_value(name: str) -> str:
+    if re.search(r"URL|URI|HOST|ENDPOINT|DSN|DOMAIN", name):
+        return "http://127.0.0.1:9"
+    if name.endswith("PATH"):
+        return "/tmp/wf-dummy"
+    if "EMAIL" in name:
+        return "wf@example.invalid"
+    return "wf-dummy-0000000000000000"
+
+
+def probe(slug: str, entry: Dict[str, Any], args: List[str], env: Dict[str, str]) -> Dict[str, Any]:
+    cmd = (
+        ["docker", "run", "-i", "--rm", "--network", "none", "--memory", "768m", "--cpus", "1",
+         "--pids-limit", "256", "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+         "--label", f"wf-campaign={slug}", "-e", "HOME=/tmp", "-w", "/tmp", "-v", f"{VOLUME}:/pkgs:ro"]
+        + sum((["-e", f"{k}={v}"] for k, v in env.items()), [])
+        + [IMAGE, "node", "-e", PROBE_JS, json.dumps(entry["cmd"] + args)]
+    )
+    r = sh(cmd, timeout=60)
+    m = re.search(r"WFPROBE(\{.*\})", r["out"])
+    if m is None:
+        return {"ok": False, "why": f"probe_failed rc={r['rc']}", "junk": [], "stderr": r["err"][-1500:]}
+    return json.loads(m.group(1))
+
+
+def retry_target(t: Dict[str, Any], a: argparse.Namespace) -> str:
+    st = read_state(t)
+    first = st.get("scan", {}).get("status")
+    if not (st.get("done") and (first == "no_start" or st.get("error"))):
+        return "skip"
+    if st.get("retry_done"):
+        return "cached:" + st.get("scan", {}).get("status", "?")
+    aborted = False
+    try:
+        st["install"] = install(t)
+        if not st["install"]["ok"]:
+            st["scan"] = {"status": "install_fail"}
+            return "install_fail"
+        entry = st["install"]["entry"]
+        attempts: List[Dict[str, Any]] = []
+        env: Dict[str, str] = {}
+        found: Optional[Tuple[List[str], Dict[str, Any]]] = None
+        for _pass in range(2):
+            for args in ARG_VARIANTS:
+                r = probe(t["slug"], entry, args, env)
+                attempts.append({"args": args, "env": sorted(env), "ok": r["ok"], "why": r["why"],
+                                 "junk": r["junk"], "stderr": r["stderr"][-600:]})
+                if r["ok"]:
+                    found = (args, r)
+                    break
+            if found:
+                break
+            asked = {n for at in attempts for n in ENV_NAME.findall(at["stderr"])} - set(env)
+            if not asked:
+                break
+            env.update({n: dummy_value(n) for n in sorted(asked)})
+        st["retry"] = {"attempts": attempts}
+        if st.get("scan", {}).get("status") and "first_scan" not in st:
+            st["first_scan"] = st["scan"]
+        if found is None:
+            needs = bool(env) or any(
+                re.search(r"api[_ -]?key|token|credential|not set|required|missing|configur", at["stderr"], re.I)
+                for at in attempts
+            )
+            st["scan"] = {"status": "needs_config" if needs else "no_start", "env_tried": sorted(env)}
+            return st["scan"]["status"]
+        args, r = found
+        st["launch"] = {"args": args, "env": env}
+        if r["junk"]:
+            st["scan"] = {"status": "stdout_pollution", "launch": st["launch"], "junk": r["junk"]}
+            return "stdout_pollution"
+        st.pop("error", None)
+        st["scan"] = scan(t, {**entry, "args": args, "env": env}, a)
+        return st["scan"]["status"] + f" (args={args} env={sorted(env)})"
+    except Exception as e:  # recorded, never swallowed
+        st["error"] = f"{type(e).__name__}: {e}"
+        return f"error({st['error'][:120]})"
+    except DockerUnreachable:
+        aborted = True
+        raise
+    finally:
+        if not aborted:
+            cleanup(t["slug"])
+            st["retry_done"] = True
         st["wallfacer"] = a.wallfacer_version
         write_state(t, st)
 
@@ -368,6 +530,10 @@ def classify_fuzz(item: Dict[str, Any], server_err: str) -> str:
     if is_readbuffer_crash(kind, item.get("sample", {}).get("repro", {}).get("tool_call"), server_err):
         return "known:ts-sdk-readbuffer"
     if kind == "hang" and NETWORK_MARKERS.search(server_err):
+        return "env:network-sandbox"
+    if kind == "internal_error" and NETWORK_MARKERS.search(
+        str(item.get("sample", {}).get("details", ""))
+    ):
         return "env:network-sandbox"
     if item.get("label") != "stable":
         return "noise:" + str(item.get("label"))
@@ -392,6 +558,8 @@ def report() -> None:
             or ("install_fail" if not st.get("install", {}).get("ok") else "error"),
             "error": st.get("error"),
             "tool_count": st.get("scan", {}).get("tool_count"),
+            "launch": st.get("launch"),
+            "first_status": st.get("first_scan", {}).get("status"),
             "fuzz": [],
             "property": [],
         }
@@ -426,6 +594,8 @@ def report() -> None:
                     if is_readbuffer_crash(k["type"], f.get("repro", {}).get("tool_call"), server_err):
                         cls = "known:ts-sdk-readbuffer"
                     elif k["type"] == "hang" and NETWORK_MARKERS.search(server_err):
+                        cls = "env:network-sandbox"
+                    elif k["type"] == "internal_error" and NETWORK_MARKERS.search(f.get("details", "")):
                         cls = "env:network-sandbox"
                     row["property"].append(
                         {
@@ -475,7 +645,7 @@ def report() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["run", "report"])
+    ap.add_argument("stage", choices=["run", "retry", "report"])
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--limit", type=int)
@@ -501,10 +671,13 @@ def main() -> None:
         ts = ts[: a.limit]
     n, done = len(ts), 0
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = {ex.submit(process, t, a): t for t in ts}
+        fn = retry_target if a.stage == "retry" else process
+        futs = {ex.submit(fn, t, a): t for t in ts}
         for f in cf.as_completed(futs):
             done += 1
-            with open(RUNS / "run.log", "a") as lg:
+            if f.result() == "skip":
+                continue
+            with open(RUNS / f"{a.stage}.log", "a") as lg:
                 lg.write(f"{done}/{n}\t{futs[f]['slug']}\t{f.result()}\n")
 
 
