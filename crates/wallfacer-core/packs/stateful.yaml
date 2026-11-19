@@ -64,6 +64,12 @@ sequences:
           - { isError: false, content: [] }
           - { isError: true, content: [{ type: "text", text: "not found" }] }
         expect: pass
+      - name: "inconclusive when create rejects the probe"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "missing required field" }] }
+          - { isError: false, content: [] }
+          - { isError: false, content: [] }
+        expect: inconclusive
       - name: "fails when the read after delete returns the resurrected record"
         responses:
           - { isError: false, structuredContent: { id: 42 }, content: [] }

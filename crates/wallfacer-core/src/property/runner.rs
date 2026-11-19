@@ -174,19 +174,24 @@ pub fn evaluate_fixture(invariant: &Invariant, fixture: &TestFixture) -> Fixture
             .collect::<serde_json::Map<_, _>>();
         Value::Object(map)
     });
+    if fixture.expect == FixtureExpect::Inconclusive {
+        return FixtureOutcome::Structural {
+            error: "`expect: inconclusive` only applies to sequence fixtures".to_string(),
+        };
+    }
     match evaluate(invariant, input, fixture.response.clone()) {
         Ok(()) => match fixture.expect {
             FixtureExpect::Pass => FixtureOutcome::Match,
-            FixtureExpect::Fail => FixtureOutcome::Mismatch {
-                expected: FixtureExpect::Fail,
+            FixtureExpect::Fail | FixtureExpect::Inconclusive => FixtureOutcome::Mismatch {
+                expected: fixture.expect,
                 observed: FixtureExpect::Pass,
                 detail: String::new(),
             },
         },
         Err(RunnerError::Assertion(message)) => match fixture.expect {
             FixtureExpect::Fail => FixtureOutcome::Match,
-            FixtureExpect::Pass => FixtureOutcome::Mismatch {
-                expected: FixtureExpect::Pass,
+            FixtureExpect::Pass | FixtureExpect::Inconclusive => FixtureOutcome::Mismatch {
+                expected: fixture.expect,
                 observed: FixtureExpect::Fail,
                 detail: message,
             },

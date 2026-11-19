@@ -15,35 +15,33 @@ pub async fn run(_args: DoctorArgs, config_path: Option<&Path>) -> Result<()> {
         .context("failed to connect to MCP target")?;
 
     let tools = client.list_tools().await.context("failed to list tools")?;
-    // Capability-aware listing: `list_resources` / `list_prompts`
-    // already short-circuit to an empty vec when the server didn't
-    // advertise the capability, but we want the doctor table to show
-    // "n/a" rather than "0" so the operator can tell "server
-    // declares the cap, vector is empty" from "server didn't declare
-    // the cap at all".
+    // Capability-aware listing: "n/a" when the server didn't declare the
+    // capability, a count when the listing works, and "error" when the
+    // server declares the capability but the listing fails (seen in the
+    // wild as `-32601 Method not found`). The latter is a server-side
+    // inconsistency worth reporting, not a reason to abort: tools were
+    // listed, so the target is usable.
     let capabilities = client.server_capabilities().await;
-    let supports_resources = capabilities
-        .as_ref()
-        .is_some_and(|caps| caps.resources.is_some());
-    let supports_prompts = capabilities
-        .as_ref()
-        .is_some_and(|caps| caps.prompts.is_some());
-    let resources = if supports_resources {
-        client
-            .list_resources()
-            .await
-            .context("failed to list resources")?
+    let resources = if capabilities.as_ref().is_some_and(|c| c.resources.is_some()) {
+        Listing::from(client.list_resources().await.map(|r| r.len()))
     } else {
-        Vec::new()
+        Listing::NotDeclared
     };
-    let prompts = if supports_prompts {
-        client
-            .list_prompts()
-            .await
-            .context("failed to list prompts")?
+    let prompts = if capabilities.as_ref().is_some_and(|c| c.prompts.is_some()) {
+        Listing::from(client.list_prompts().await.map(|p| p.len()))
     } else {
-        Vec::new()
+        Listing::NotDeclared
     };
+    for (capability, method, listing) in [
+        ("resources", "resources/list", &resources),
+        ("prompts", "prompts/list", &prompts),
+    ] {
+        if let Listing::Failed(error) = listing {
+            eprintln!(
+                "warning: server declares the `{capability}` capability but `{method}` failed: {error}"
+            );
+        }
+    }
 
     let mut summary = Table::new();
     summary.load_preset(UTF8_FULL);
@@ -52,16 +50,8 @@ pub async fn run(_args: DoctorArgs, config_path: Option<&Path>) -> Result<()> {
         Cell::new(path.display()),
         Cell::new(config.target.transport_name()),
         Cell::new(tools.len()),
-        Cell::new(if supports_resources {
-            resources.len().to_string()
-        } else {
-            "n/a".to_string()
-        }),
-        Cell::new(if supports_prompts {
-            prompts.len().to_string()
-        } else {
-            "n/a".to_string()
-        }),
+        Cell::new(resources.cell()),
+        Cell::new(prompts.cell()),
     ]);
     println!("{summary}");
 
@@ -81,4 +71,31 @@ pub async fn run(_args: DoctorArgs, config_path: Option<&Path>) -> Result<()> {
         .await
         .context("failed to shut down client")?;
     Ok(())
+}
+
+/// Outcome of an optional capability listing (`resources/list`,
+/// `prompts/list`) as shown in the doctor summary.
+enum Listing {
+    NotDeclared,
+    Listed(usize),
+    Failed(String),
+}
+
+impl<E: std::fmt::Display> From<std::result::Result<usize, E>> for Listing {
+    fn from(result: std::result::Result<usize, E>) -> Self {
+        match result {
+            Ok(count) => Listing::Listed(count),
+            Err(error) => Listing::Failed(error.to_string()),
+        }
+    }
+}
+
+impl Listing {
+    fn cell(&self) -> String {
+        match self {
+            Listing::NotDeclared => "n/a".to_string(),
+            Listing::Listed(count) => count.to_string(),
+            Listing::Failed(_) => "error".to_string(),
+        }
+    }
 }

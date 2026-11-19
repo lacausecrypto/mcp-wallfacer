@@ -103,11 +103,20 @@ let report = plan.execute(&mut client, &corpus, &mut reporter).await?;
    - `derive_seed_canonical` produces a 256-bit seed; `ChaCha20Rng`
      drives a `try_generate_payload` call (Phase B + E5).
    - On `Skip`, the tool is recorded in `report.skipped` and we move on.
-   - On call success, no finding.
+   - On call success, no finding. A JSON-RPC error reply that rejects
+     the request (`-32700`, `-32600..-32602`) is a correct answer to a
+     generated payload: no finding either.
    - On `Hang/Crash/ProtocolError`, a `Finding` is built, written to
      `Corpus`, surfaced via `Reporter::on_finding`, and the plan calls
      `client.reconnect()` so subsequent iterations have a fresh
      transport (Phase E1).
+   - On any other JSON-RPC error reply (`-32603`, server-defined
+     codes), an `InternalError { code }` finding (low severity) is
+     recorded without reconnecting: the session is still healthy.
+   - `property` and sequences evaluate a JSON-RPC error reply as an
+     `isError: true` result (it is a rejection); hang, crash and
+     protocol error are reported as their own finding kinds and never
+     evaluated against the invariant.
 4. `Reporter::on_run_end()` flushes summary tables / final JSON / SARIF.
 
 `TortureRun` is a sibling: it fans out parallel calls under a shared

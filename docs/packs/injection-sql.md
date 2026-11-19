@@ -9,7 +9,7 @@
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `drop_table_pattern` | string | `(?i)\b(?:dropped\|truncated\|table\s+removed)\b` | Regex matching DROP TABLE / TRUNCATE acks the server should never confirm. |
+| `drop_table_pattern` | string | `(?i)\b(?:table\s+(?:[\w."`]+\s+)?(?:was\s+\|has\s+been\s+)?(?:dropped\|truncated\|removed)\|(?:dropped\|truncated)\s+(?:the\s+)?table)\b` | Regex matching DROP TABLE / TRUNCATE acks the server should never confirm. |
 | `query_field` | string | `query` | Field name carrying the SQL string. |
 | `query_tool` | string | `query_db` | Tool that takes a SQL fragment / query and returns rows. |
 
@@ -20,7 +20,7 @@
 - **Tool:** `query_db`
 - **Inputs:** fixed (1 field(s))
 - **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Test fixtures:** 7 (`pass`, `pass`, `pass`, `pass`, `fail`, `fail`, `fail`)
 
 ### `sqli.union_select_does_not_leak_password_column`
 
@@ -72,7 +72,9 @@ metadata:
     drop_table_pattern:
       description: "Regex matching DROP TABLE / TRUNCATE acks the server should never confirm."
       type: string
-      default: "(?i)\\b(?:dropped|truncated|table\\s+removed)\\b"
+      # Requires a table context: a bare "truncated" also matches JSON keys
+      # (`"truncated": false`) and "output truncated" notices.
+      default: '(?i)\b(?:table\s+(?:[\w."`]+\s+)?(?:was\s+|has\s+been\s+)?(?:dropped|truncated|removed)|(?:dropped|truncated)\s+(?:the\s+)?table)\b'
 
 invariants:
   - name: "sqli.semicolon_drop_is_rejected_or_suppressed"
@@ -97,6 +99,21 @@ invariants:
       - name: "passes when no DROP confirmation"
         response: { isError: false, content: [{ type: "text", text: "0 rows" }] }
         expect: pass
+      - name: "passes when a JSON field is named truncated"
+        response:
+          isError: false
+          content:
+            - { type: "text", text: '{"matched_count": 0, "truncated": false, "results": []}' }
+        expect: pass
+      - name: "passes when output is truncated"
+        response: { isError: false, content: [{ type: "text", text: "Output truncated to 100 lines." }] }
+        expect: pass
+      - name: "fails when the table is reported dropped"
+        response: { isError: false, content: [{ type: "text", text: "dropped table users" }] }
+        expect: fail
+      - name: "fails when the table is reported removed"
+        response: { isError: false, content: [{ type: "text", text: "Table removed." }] }
+        expect: fail
       - name: "fails when DROP confirmed"
         response:
           isError: false

@@ -78,7 +78,7 @@ sequences:
 | `call` | yes | Tool name. Skipped if the server doesn't advertise it. |
 | `with` | no | Input arguments. Defaults to `{}`. May contain step references. |
 | `bind` | no | Names the step's `{input, response}` envelope for later reference. |
-| `expect` | no | `ok` (default) or `error`. Coarse outcome check. |
+| `expect` | no | `ok` or `error`: a checked outcome; a mismatch fails the sequence. When omitted, the step is a **precondition**: if it returns `isError`, the sequence is reported *inconclusive* (skipped, no finding), because the setup never happened. The same applies when a later step references a value an earlier step didn't return. Sequence fixtures can assert this with `expect: inconclusive`. |
 | `assert` | no | Per-step assertions; same vocabulary as single-tool invariants. |
 
 ## Substitution syntax

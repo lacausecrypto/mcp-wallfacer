@@ -35,11 +35,12 @@ It complements static scanners (Snyk Agent Scan, Cisco MCP Scanner, Enkrypt) by 
 | `Hang` | call exceeds its per-call timeout |
 | `SchemaViolation` | response drifts from declared output schema |
 | `PropertyFailure` | YAML invariant fails (e.g. response leaks an API key) |
-| `ProtocolError` | server returns malformed JSON-RPC |
+| `ProtocolError` | the exchange breaks: malformed or unexpected JSON-RPC message |
+| `InternalError` | a tool call gets a JSON-RPC error other than a request rejection (`-32603`, server-defined codes): the tool threw on that input. Low severity. `-32600..-32602` replies are correct rejections and are not reported |
 | `StateLeak` | session state visible across the wrong boundary |
 | `SequenceFailure` | multi-step invariant breaks (e.g. delete-then-read finds the deleted record) |
 
-A seven-bug demo server lives at [`examples/python_server/`](examples/python_server/) — running every wallfacer mode against it surfaces every kind above.
+A demo server with intentional bugs lives at [`examples/python_server/`](examples/python_server/) — running every wallfacer mode against it surfaces every kind above.
 
 ## 30-second quickstart
 
@@ -218,7 +219,7 @@ Full reference: [`docs/install.md`](docs/install.md), [`docs/architecture.md`](d
 
 ## Example
 
-[`examples/python_server/`](examples/python_server/) ships a seven-bug Python MCP server that exercises every `FindingKind`. The acceptance suite gates CI against this fixture.
+[`examples/python_server/`](examples/python_server/) ships a Python MCP server with intentional bugs that exercises every `FindingKind`. The acceptance suite gates CI against this fixture.
 
 ```bash
 cd examples/python_server

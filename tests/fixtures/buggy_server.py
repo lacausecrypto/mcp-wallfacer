@@ -225,6 +225,19 @@ async def handle_request(message: Dict[str, Any]) -> None:
             }
         elif method == "tools/list":
             result = {"tools": TOOLS}
+        elif method in ("resources/list", "prompts/list") and os.environ.get(
+            "WALLFACER_FIXTURE_UNIMPLEMENTED_LISTS"
+        ):
+            # BUG (opt-in): the capability is declared at initialize but the
+            # method is not implemented, as seen on real servers.
+            await send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            )
+            return
         elif method == "resources/list":
             result = {"resources": []}
         elif method == "prompts/list":

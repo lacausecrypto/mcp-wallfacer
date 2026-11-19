@@ -75,7 +75,14 @@ TOOLS = [
     # FindingKind::ProtocolError — server emits non-JSON before its response.
     {
         "name": "bad_protocol",
-        "description": "BUG: writes a non-JSON-RPC line to stdout.",
+        "description": "BUG: answers with a result that is not a valid CallToolResult.",
+        "inputSchema": object_schema({}, []),
+    },
+    # FindingKind::InternalError — the tool raises, the server turns it
+    # into a JSON-RPC error reply (-32603).
+    {
+        "name": "throws_internally",
+        "description": "BUG: raises on every call instead of returning isError.",
         "inputSchema": object_schema({}, []),
     },
     # FindingKind::StateLeak — session_get reads global session state seeded
@@ -232,10 +239,14 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         count = limit + 1 if PAGINATE_TOGGLE % 2 else limit
         return structured_result({"items": list(range(count))})
     if name == "bad_protocol":
-        # Raises so the framework's catch-all writes a JSON-RPC error
-        # envelope; rmcp surfaces that as `CallOutcome::ProtocolError` and
-        # wallfacer records a `FindingKind::ProtocolError`.
-        raise RuntimeError("malformed by design")
+        # A well-formed JSON-RPC reply whose `result` breaks the
+        # CallToolResult shape (`content` must be an array): the client
+        # can't decode it, wallfacer records a `FindingKind::ProtocolError`.
+        return {"content": "malformed by design"}
+    if name == "throws_internally":
+        # The catch-all turns this into a JSON-RPC error reply; wallfacer
+        # records a low-severity `FindingKind::InternalError`.
+        raise RuntimeError("unhandled by design")
     if name == "session_set":
         SESSIONS[str(args["key"])] = args.get("value")
         return structured_result({"ok": True})

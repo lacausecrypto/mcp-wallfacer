@@ -229,7 +229,14 @@ impl TortureRun {
         let outcomes = join_all(calls).await;
         let success_count = outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, CallOutcome::Ok(_)))
+            // A request rejection is a completed call. Other JSON-RPC
+            // errors (internal error under concurrency) stay failures:
+            // they are the race signal this mode looks for.
+            .filter(|outcome| match outcome {
+                CallOutcome::Ok(_) => true,
+                CallOutcome::JsonRpcError { code, .. } => CallOutcome::is_request_rejection(*code),
+                _ => false,
+            })
             .count();
 
         let mut findings = Vec::new();

@@ -145,9 +145,12 @@ pub struct SequenceStep {
     /// reference this step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<String>,
-    /// Expected outcome class. Defaults to [`StepOutcome::Ok`].
-    /// `Error` lets the sequence assert the step *should* fail (e.g.
-    /// post-logout, the protected resource must reject the call).
+    /// Expected outcome class. `Error` asserts the step *should* fail
+    /// (e.g. post-logout, the protected resource must reject the call);
+    /// `Ok` asserts it must succeed. When omitted, the step is a
+    /// precondition: it is expected to succeed, but if it returns
+    /// `isError` the sequence is reported inconclusive (skipped), not
+    /// failed — the setup didn't happen, so nothing was tested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<StepOutcome>,
     /// Per-step assertions. Evaluated against the same
@@ -426,6 +429,9 @@ pub enum FixtureExpect {
     Pass,
     /// Invariant evaluation must return `Err(RunnerError::Assertion(...))`.
     Fail,
+    /// Sequence fixtures only: a precondition step (no explicit `expect`)
+    /// returned an error, so the sequence proves nothing either way.
+    Inconclusive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

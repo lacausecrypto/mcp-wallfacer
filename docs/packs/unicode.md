@@ -18,15 +18,15 @@
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(equals(path `$.response.isError` == literal `false`))
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Assertion summary:** matches_schema(`$.response`)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
 ### `unicode.zero_width_joiner_handled`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Assertion summary:** matches_schema(`$.response`)
+- **Test fixtures:** 4 (`pass`, `pass`, `pass`, `fail`)
 
 ### `unicode.escape_sequence_for_null_byte_not_reflected_visibly`
 
@@ -51,8 +51,11 @@ Raw YAML, embedded into the binary at compile time:
 #
 # Probes a string-bridging tool with unicode trickery (RTL override,
 # zero-width joiners, null bytes, surrogates) and asserts the server
-# either rejects the input or returns it without re-introducing the
-# adversarial codepoints into structured fields.
+# handles it: a crash, hang or protocol error is reported by the runner
+# itself, and the invariants check the reply stays a well-formed
+# envelope. Accepting or echoing the codepoints is not a failure: they
+# are valid Unicode (ZWJ builds emoji sequences) and only come from the
+# probe input, so flagging their presence would only detect reflection.
 version: 3
 metadata:
   name: unicode
@@ -75,17 +78,23 @@ invariants:
     fixed:
       "{{witness_field}}": "user‮evil"
     assert:
-      - kind: not
-        assertion:
-          kind: equals
-          lhs: { path: "$.response.isError" }
-          rhs: { value: false }
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [content]
+          properties:
+            content: { type: array }
+            isError: { type: boolean }
     test_fixtures:
       - name: "passes when server flags the input"
         response: { isError: true, content: [{ type: "text", text: "rejected" }] }
         expect: pass
-      - name: "fails when server silently accepts RTL override"
+      - name: "passes when server accepts the RTL override"
         response: { isError: false, content: [{ type: "text", text: "ok" }] }
+        expect: pass
+      - name: "fails when the envelope loses its content"
+        response: { isError: false }
         expect: fail
 
   - name: "unicode.zero_width_joiner_handled"
@@ -93,28 +102,29 @@ invariants:
     fixed:
       "{{witness_field}}": "alice‍bob"
     assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "\\u200d"
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [content]
+          properties:
+            content: { type: array }
+            isError: { type: boolean }
     test_fixtures:
       - name: "passes when ZWJ rejected"
-        response: { isError: true }
+        response: { isError: true, content: [{ type: "text", text: "rejected" }] }
         expect: pass
       - name: "passes when ZWJ stripped"
         response: { isError: false, content: [{ type: "text", text: "alicebob" }] }
         expect: pass
-      - name: "fails when ZWJ reflected literally"
+      - name: "passes when ZWJ echoed back (search queries, echo tools)"
         response:
           isError: false
           content:
-            - { type: "text", text: "you said: alice‍bob (literal \\u200d)" }
+            - { type: "text", text: "No operations matched \"alice‍bob\"." }
+        expect: pass
+      - name: "fails when isError is not a boolean"
+        response: { isError: "false", content: [{ type: "text", text: "ok" }] }
         expect: fail
 
   - name: "unicode.escape_sequence_for_null_byte_not_reflected_visibly"

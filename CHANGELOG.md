@@ -6,10 +6,71 @@ and the project adheres to [SemVer](https://semver.org).
 
 ## Unreleased
 
-Fixes found by the first pass of the v0.8 real-world campaign
-(`server-everything`, `context7`, `desktop-commander`,
-`mcp-server-fetch`): most findings were false positives produced by
-wallfacer itself, and one class of real failures was hidden.
+Fixes found by the v0.8 real-world campaign (popular npm / PyPI MCP
+servers run in a network-less sandbox): most findings were false
+positives produced by wallfacer itself, and one class of real failures
+was hidden.
+
+### Fixed — JSON-RPC error replies were reported as protocol errors
+
+Any JSON-RPC error a server returned for a tool call (`-32602 invalid
+params`, `-32603 internal error`…) became a high-severity
+`protocol_error`, although a well-formed error reply is a valid
+exchange. On the campaign this was most of the remaining findings. The
+client now distinguishes `CallOutcome::JsonRpcError { code, message }`
+from a broken exchange (`ProtocolError`):
+
+- `fuzz`: request rejections (`-32700`, `-32600..-32602`) are the correct
+  answer to a generated payload and are not reported. Other codes
+  (`-32603`, server-defined `-32000..-32099`) mean the tool threw on that
+  input: new `internal_error { code }` finding kind, low severity, no
+  reconnect.
+- `property`, sequences, `corpus minimize`: the reply is evaluated as an
+  `isError: true` result, since it is a rejection.
+- `torture`: a request rejection counts as a completed call; an internal
+  error under concurrency still counts as a failure (race signal).
+- `replay` / `corpus minimize --replay` reproduce `internal_error` by code.
+
+New finding kind: consumers matching on `kind.type` should handle
+`internal_error` (SARIF rule `internal_error`).
+
+### Fixed — `doctor` aborted when a declared listing failed
+
+A server that declares the `resources` or `prompts` capability but
+answers `-32601 Method not found` made `doctor` exit with an error, so
+the target looked like it never started. `doctor` now lists the tools,
+shows `error` in that column and explains the failure on stderr.
+
+### Fixed — sequences reported failed setups as state leaks
+
+When a precondition step failed (the `stateful` probe's `create` call
+rejecting generic arguments), or a later step referenced a value the
+setup never returned, the sequence was a `sequence_failure`. A step
+without an explicit `expect` is now a precondition: if it returns
+`isError`, or a reference doesn't resolve, the sequence is reported
+inconclusive (skipped, no finding). Explicit `expect` mismatches,
+assertion failures and transport failures still fail it. Sequence
+fixtures accept `expect: inconclusive`.
+
+### Fixed — more pack and heuristic false positives
+
+- `suggest` matched name heuristics as substrings: `customerDataProvider`
+  and `tools_documentation` became `whoami` tools (`me`),
+  `execute_insights_query` a shell tool (`exec`), and `compute_output` a
+  mutating tool (`put`). Names are now split into words (snake, kebab,
+  camelCase) and matched whole.
+- `injection-sql`: the drop-acknowledgement pattern matched any
+  "truncated", including the JSON key `"truncated": false`. It now
+  requires a table context (`table users dropped`, `dropped table`).
+- `tool-annotations.open_world_no_internal_path_leak` flagged any
+  `/home/...` path, including usage examples like `/home/user/my-project`.
+  It now targets source files, `node_modules` / `site-packages` and
+  `line:col` stack-trace references under a home directory.
+- `unicode`: `rtl_override_does_not_crash_or_panic` required tools to
+  reject RTL overrides, and `zero_width_joiner_handled` failed when the
+  ZWJ (valid in emoji sequences) was echoed back. Both now check that the
+  reply stays a well-formed envelope; crashes and hangs are reported by
+  the runner.
 
 ### Fixed — `property` and sequences reported crashed servers as passing
 
@@ -54,6 +115,10 @@ reflectors, the two packs are not suggested.
 
 - `examples/python_server`: `list_active_users` now returns a string
   `isError` (a real violation) instead of a spec-valid envelope.
+- `examples/python_server`: `bad_protocol` now answers with a result that
+  is not a valid `CallToolResult` (a real protocol violation); its former
+  behaviour (raising, turned into a `-32603` reply) moved to the new
+  `throws_internally` tool, which triggers `internal_error`.
 
 ## v0.8.1 — 2026-05-01
 

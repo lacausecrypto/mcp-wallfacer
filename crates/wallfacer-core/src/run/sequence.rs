@@ -61,6 +61,17 @@ pub struct SequenceReport {
     /// partially execute a sequence — pre-flight check fails the
     /// whole thing — so the operator sees a single skip per sequence.
     pub skipped_missing_tool: Vec<SkippedSequence>,
+    /// Sequences that could not run to a verdict because a precondition
+    /// step failed (see [`crate::property::dsl::SequenceStep::expect`]).
+    pub inconclusive: Vec<InconclusiveSequence>,
+}
+
+/// One sequence whose setup did not succeed.
+#[derive(Debug, Clone, Serialize)]
+pub struct InconclusiveSequence {
+    pub sequence: String,
+    pub step_index: usize,
+    pub reason: String,
 }
 
 /// One sequence skipped because of a missing tool.
@@ -189,6 +200,17 @@ impl SequencePlan {
                 SequenceOutcome::Pass => {
                     report.passed.push(sequence.name.clone());
                 }
+                SequenceOutcome::Inconclusive { step_index, reason } => {
+                    reporter.on_skipped(
+                        &sequence.name,
+                        &format!("inconclusive: precondition step {step_index} failed ({reason})"),
+                    );
+                    report.inconclusive.push(InconclusiveSequence {
+                        sequence: sequence.name.clone(),
+                        step_index,
+                        reason,
+                    });
+                }
                 SequenceOutcome::Fail {
                     step_index,
                     step_call,
@@ -229,6 +251,13 @@ impl SequencePlan {
 /// Internal result of running a single sequence.
 enum SequenceOutcome {
     Pass,
+    /// A precondition step (no explicit `expect`) returned an error, or a
+    /// later step referenced a value that setup step never produced. The
+    /// sequence didn't get to test anything: reported as skipped.
+    Inconclusive {
+        step_index: usize,
+        reason: String,
+    },
     Fail {
         step_index: usize,
         step_call: String,
@@ -268,15 +297,13 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             .unwrap_or(Value::Object(Map::new()));
         let substituted = match context.substitute(&raw_input) {
             Ok(value) => value,
+            // An earlier step succeeded but didn't return the value this
+            // step needs (e.g. no `structuredContent.id`): the sequence
+            // can't proceed, which says nothing about the server's state.
             Err(err) => {
-                return SequenceOutcome::Fail {
+                return SequenceOutcome::Inconclusive {
                     step_index,
-                    step_call: step.call.clone(),
-                    detail: format!(
-                        "could not substitute step references in `with:` of step \
-                         {step_index}: {err}"
-                    ),
-                    last_input: raw_input,
+                    reason: format!("step references did not resolve: {err}"),
                 };
             }
         };
@@ -353,6 +380,12 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
         // Outcome class check (Ok / Error). Only matters when `expect`
         // is set: with the default the runner falls through to the
         // assertion list.
+        if step.expect.is_none() && check_step_outcome(&response, StepOutcome::Ok).is_some() {
+            return SequenceOutcome::Inconclusive {
+                step_index,
+                reason: format!("`{}` returned isError", step.call),
+            };
+        }
         let expected = step.expect.unwrap_or_default();
         if let Some(detail) = check_step_outcome(&response, expected) {
             if let Some(c) = corpus {
@@ -460,6 +493,10 @@ async fn invoke<C: McpExec + ?Sized>(
         CallOutcome::Hang(duration) => Err(format!("hang: no response after {duration:?}")),
         CallOutcome::Crash(reason) => Err(format!("crash: {reason}")),
         CallOutcome::ProtocolError(message) => Err(format!("protocol error: {message}")),
+        // A JSON-RPC error reply is a rejection the step can expect.
+        CallOutcome::JsonRpcError { code, message } => Ok(
+            crate::run::property::json_rpc_error_envelope(code, &message),
+        ),
     }
 }
 
@@ -615,6 +652,7 @@ pub fn evaluate_sequence_fixture(
 
     let mut context = SequenceContext::new();
     let mut sequence_failed_at: Option<(usize, String)> = None;
+    let mut inconclusive_at: Option<usize> = None;
 
     for (step_index, step) in sequence.steps.iter().enumerate() {
         let raw_input = step
@@ -634,6 +672,10 @@ pub fn evaluate_sequence_fixture(
         };
         let response = fixture.responses[step_index].clone();
 
+        if step.expect.is_none() && check_step_outcome(&response, StepOutcome::Ok).is_some() {
+            inconclusive_at = Some(step_index);
+            break;
+        }
         let expected = step.expect.unwrap_or_default();
         if let Some(detail) = check_step_outcome(&response, expected) {
             sequence_failed_at = Some((step_index, format!("outcome mismatch: {detail}")));
@@ -660,7 +702,9 @@ pub fn evaluate_sequence_fixture(
         }
     }
 
-    let observed = if sequence_failed_at.is_some() {
+    let observed = if inconclusive_at.is_some() {
+        FixtureExpect::Inconclusive
+    } else if sequence_failed_at.is_some() {
         FixtureExpect::Fail
     } else {
         FixtureExpect::Pass
@@ -671,6 +715,9 @@ pub fn evaluate_sequence_fixture(
     } else {
         let detail = sequence_failed_at
             .map(|(idx, msg)| format!("step {idx}: {msg}"))
+            .or_else(|| {
+                inconclusive_at.map(|idx| format!("precondition step {idx} returned isError"))
+            })
             .unwrap_or_else(|| "all steps passed".to_string());
         SequenceFixtureOutcome::Mismatch {
             expected: fixture.expect,
@@ -744,7 +791,123 @@ mod tests {
                 assert_eq!(step_index, 1);
                 assert!(detail.contains("crash: process exited"), "{detail}");
             }
-            SequenceOutcome::Pass => panic!("crashed step must not satisfy `expect: error`"),
+            SequenceOutcome::Pass | SequenceOutcome::Inconclusive { .. } => {
+                panic!("crashed step must fail the sequence")
+            }
+        }
+    }
+
+    /// A JSON-RPC error reply satisfies `expect: error`: reading a
+    /// deleted record and getting "not found" is the correct behaviour.
+    #[tokio::test]
+    async fn json_rpc_error_satisfies_expect_error() {
+        use crate::client::CallOutcome;
+        use crate::run::exec::MockClient;
+        use rand::SeedableRng;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = MockClient::new()
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| CallOutcome::JsonRpcError {
+                code: -32602,
+                message: "record not found".to_string(),
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: deleted_record_is_gone\nsteps:\n  - call: record_delete\n  - call: record_read\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        let outcome = run_one_sequence(
+            &mut client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await;
+        assert!(matches!(outcome, SequenceOutcome::Pass));
+    }
+
+    fn crud_client(
+        create: fn(&Value) -> crate::client::CallOutcome,
+    ) -> crate::run::exec::MockClient {
+        use crate::client::CallOutcome;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        crate::run::exec::MockClient::new()
+            .register(tool("record_create"), create)
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+    }
+
+    async fn run_crud(client: &mut crate::run::exec::MockClient) -> SequenceOutcome {
+        use rand::SeedableRng;
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: s\nsteps:\n  - call: record_create\n    bind: created\n  - call: record_delete\n    with: { id: \"{{steps.created.response.structuredContent.id}}\" }\n  - call: record_read\n    with: { id: \"{{steps.created.response.structuredContent.id}}\" }\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        run_one_sequence(
+            client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await
+    }
+
+    /// Campaign regression: when the setup `create` rejected the probe's
+    /// generic arguments, the sequence was reported as a state leak.
+    #[tokio::test]
+    async fn failed_precondition_step_is_inconclusive() {
+        use crate::client::CallOutcome;
+        let mut client =
+            crud_client(|_| CallOutcome::Ok(rmcp::model::CallToolResult::error(vec![])));
+        match run_crud(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, .. } => assert_eq!(step_index, 0),
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
+        }
+    }
+
+    /// Setup succeeded but returned no `structuredContent.id`: the next
+    /// step can't be built, which is not a state leak either.
+    #[tokio::test]
+    async fn unresolved_step_reference_is_inconclusive() {
+        use crate::client::CallOutcome;
+        let mut client =
+            crud_client(|_| CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![])));
+        match run_crud(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, .. } => assert_eq!(step_index, 1),
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
         }
     }
 

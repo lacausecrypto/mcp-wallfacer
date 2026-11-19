@@ -241,6 +241,17 @@ impl FuzzPlan {
                         "protocol error during tool call",
                         message,
                     )),
+                    // Rejecting a generated payload is the correct answer.
+                    CallOutcome::JsonRpcError { code, .. }
+                        if CallOutcome::is_request_rejection(code) =>
+                    {
+                        None
+                    }
+                    CallOutcome::JsonRpcError { code, message } => Some((
+                        FindingKind::InternalError { code },
+                        "tool call failed with a JSON-RPC error",
+                        format!("JSON-RPC error {code}: {message}"),
+                    )),
                 };
 
                 if let Some((kind, message, details)) = kind_message_details {
@@ -279,9 +290,12 @@ impl FuzzPlan {
                             timestamp: chrono::Utc::now(),
                         });
                     }
-                    client.reconnect().await.with_context(|| {
-                        format!("failed to reconnect after fault on `{tool_name}`")
-                    })?;
+                    // An internal-error reply leaves the session intact.
+                    if !matches!(finding.kind, FindingKind::InternalError { .. }) {
+                        client.reconnect().await.with_context(|| {
+                            format!("failed to reconnect after fault on `{tool_name}`")
+                        })?;
+                    }
                     reporter.on_iteration_end(&tool_name, iteration);
                     break;
                 }
@@ -400,6 +414,57 @@ mod tests {
         assert_eq!(report.findings_count, 1);
         assert_eq!(client.reconnect_count(), 1);
         assert!(report.skipped.is_empty());
+    }
+
+    /// Campaign regression: a `-32602 invalid params` reply to a fuzzed
+    /// payload was a high-severity protocol_error. It is the correct
+    /// answer and must not be reported.
+    #[tokio::test]
+    async fn fuzz_ignores_request_rejections() {
+        let tool = make_tool(
+            "echo",
+            json!({"type": "object", "properties": {"msg": {"type": "string"}}}),
+        );
+        let mut client = MockClient::new().register(tool, |_args| CallOutcome::JsonRpcError {
+            code: -32602,
+            message: "invalid params".to_string(),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 0);
+        assert_eq!(client.reconnect_count(), 0);
+    }
+
+    /// An internal-error reply (the tool threw on this input) is kept as a
+    /// low-severity `internal_error`, without tearing down the session.
+    #[tokio::test]
+    async fn fuzz_reports_internal_error_without_reconnecting() {
+        let tool = make_tool(
+            "save_scene",
+            json!({"type": "object", "properties": {"scenePath": {"type": "string"}}}),
+        );
+        let mut client = MockClient::new().register(tool, |_args| CallOutcome::JsonRpcError {
+            code: -32603,
+            message: "path.includes is not a function".to_string(),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 1);
+        assert_eq!(client.reconnect_count(), 0);
+        let findings = corpus.list_findings().unwrap();
+        assert!(matches!(
+            findings[0].kind,
+            FindingKind::InternalError { code: -32603 }
+        ));
+        assert_eq!(findings[0].severity, crate::finding::Severity::Low);
     }
 
     #[tokio::test]

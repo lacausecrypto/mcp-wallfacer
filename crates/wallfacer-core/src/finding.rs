@@ -27,6 +27,13 @@ pub enum FindingKind {
         invariant: String,
     },
     ProtocolError,
+    /// The server answered a tool call with a JSON-RPC error other than a
+    /// request rejection (`-32603` internal error, `-32000..-32099` server
+    /// errors, …): the tool failed on that input instead of returning an
+    /// `isError` result. Low severity: a signal, not a protocol violation.
+    InternalError {
+        code: i32,
+    },
     StateLeak,
     /// Phase L — a multi-step [`crate::property::dsl::Sequence`]
     /// failed at step `step_index`. Carries enough metadata to point a
@@ -94,6 +101,7 @@ impl FindingKind {
             FindingKind::Crash => Severity::Critical,
             FindingKind::Hang { .. } => Severity::High,
             FindingKind::ProtocolError => Severity::High,
+            FindingKind::InternalError { .. } => Severity::Low,
             FindingKind::SchemaViolation => Severity::Medium,
             FindingKind::PropertyFailure { .. } => Severity::Medium,
             FindingKind::StateLeak => Severity::High,
@@ -108,6 +116,7 @@ impl FindingKind {
             FindingKind::Crash => "crash",
             FindingKind::Hang { .. } => "hang",
             FindingKind::ProtocolError => "protocol_error",
+            FindingKind::InternalError { .. } => "internal_error",
             FindingKind::SchemaViolation => "schema_violation",
             FindingKind::PropertyFailure { .. } => "property_failure",
             FindingKind::StateLeak => "state_leak",

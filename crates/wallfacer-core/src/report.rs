@@ -287,6 +287,7 @@ fn format_kind_label(kind: &FindingKind) -> String {
         FindingKind::SchemaViolation => "schema_violation".to_string(),
         FindingKind::PropertyFailure { invariant } => format!("property: {invariant}"),
         FindingKind::ProtocolError => "protocol_error".to_string(),
+        FindingKind::InternalError { code } => format!("internal_error ({code})"),
         FindingKind::StateLeak => "state_leak".to_string(),
         FindingKind::SequenceFailure {
             sequence,

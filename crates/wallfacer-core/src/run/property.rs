@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     client::CallOutcome,
@@ -325,6 +325,15 @@ impl PropertyPlan {
     }
 }
 
+/// Error-result envelope standing in for a JSON-RPC error reply, so
+/// invariants and sequence steps see the rejection as `isError: true`.
+pub fn json_rpc_error_envelope(code: i32, message: &str) -> Value {
+    json!({
+        "content": [{"type": "text", "text": format!("JSON-RPC error {code}: {message}")}],
+        "isError": true,
+    })
+}
+
 /// Transport-level failure of a property probe: reported as its own
 /// finding kind, never evaluated against the invariant.
 type ProbeFailure = (FindingKind, &'static str, String);
@@ -341,6 +350,11 @@ async fn invoke<C: McpExec + ?Sized>(
 ) -> std::result::Result<Value, ProbeFailure> {
     let failure = match client.call_tool(tool, input, timeout).await {
         CallOutcome::Ok(result) => return Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+        // The server answered and rejected the call: evaluate it as the
+        // error result it is. Unlike a crash, this is a real rejection.
+        CallOutcome::JsonRpcError { code, message } => {
+            return Ok(json_rpc_error_envelope(code, &message))
+        }
         CallOutcome::Hang(duration) => (
             FindingKind::Hang {
                 ms: duration.as_millis() as u64,
@@ -601,6 +615,56 @@ invariants:
             "{:?}",
             findings[0].kind
         );
+    }
+
+    /// A JSON-RPC error reply is a real rejection: an invariant that
+    /// expects the call to be refused passes, and nothing is reported.
+    #[tokio::test]
+    async fn json_rpc_error_reply_counts_as_rejection() {
+        let mut client =
+            MockClient::new().register(tool("read_file"), |_| CallOutcome::JsonRpcError {
+                code: -32602,
+                message: "path outside root".to_string(),
+            });
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: traversal_rejected
+    tool: read_file
+    fixed: { path: "../../etc/passwd" }
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(report.findings_count, 0);
+        assert_eq!(client.reconnect_count(), 0);
     }
 
     #[tokio::test]

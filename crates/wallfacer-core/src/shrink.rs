@@ -48,6 +48,9 @@ pub enum ShrinkTargetKind {
     /// Original finding was a ProtocolError. Predicate matches
     /// when the candidate produces a ProtocolError outcome.
     ProtocolError,
+    /// Original finding was an InternalError. Predicate matches when
+    /// the candidate gets a JSON-RPC error reply with the same code.
+    InternalError(i32),
     /// Original finding's kind doesn't have a clean transport-
     /// level signal (PropertyFailure / SchemaViolation /
     /// SequenceFailure). The shrinker treats *any* non-clean
@@ -63,6 +66,7 @@ impl ShrinkTargetKind {
             FindingKind::Crash => Self::Crash,
             FindingKind::Hang { .. } => Self::Hang,
             FindingKind::ProtocolError => Self::ProtocolError,
+            FindingKind::InternalError { code } => Self::InternalError(*code),
             _ => Self::AnyNonOk,
         }
     }
@@ -74,6 +78,7 @@ impl ShrinkTargetKind {
             (Self::Crash, CallOutcome::Crash(_)) => true,
             (Self::Hang, CallOutcome::Hang(_)) => true,
             (Self::ProtocolError, CallOutcome::ProtocolError(_)) => true,
+            (Self::InternalError(want), CallOutcome::JsonRpcError { code, .. }) => *code == want,
             (Self::AnyNonOk, CallOutcome::Ok(_)) => false,
             (Self::AnyNonOk, _) => true,
             _ => false,

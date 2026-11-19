@@ -148,7 +148,7 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
         // Auth — whoami / current user probes
         if matches!(lower_name.as_str(), "whoami")
             || matches_any_token(
-                &lower_name,
+                name,
                 &[
                     "currentuser",
                     "current_user",
@@ -180,7 +180,7 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
         // `write_file_tool` keeps its default; the runner skips it when
         // the server does not advertise that tool.
         let mutating = matches_any_token(
-            &lower_name,
+            name,
             &[
                 "write", "save", "create", "put", "edit", "append", "move", "rename", "mkdir",
                 "delete", "remove", "upload",
@@ -227,7 +227,7 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
         let shell_field =
             first_matching_field(&tool.input_schema, &["command", "cmd", "shell", "exec"]);
         if shell_field.is_some()
-            || matches_any_token(&lower_name, &["run_shell", "exec", "shell", "subprocess"])
+            || matches_any_token(name, &["run_shell", "exec", "shell", "subprocess"])
         {
             let field = shell_field.unwrap_or_else(|| "command".to_string());
             emit(
@@ -371,10 +371,46 @@ fn is_reflector(tool: &Tool) -> bool {
         .any(|token| REFLECTORS.contains(&token))
 }
 
-/// Returns `true` when `name` contains any of `tokens` (lowercase
-/// substring match). Used for cheap name-based heuristics.
-fn matches_any_token(name: &str, tokens: &[&str]) -> bool {
-    tokens.iter().any(|t| name.contains(t))
+/// Returns `true` when `name` contains any of `phrases` as whole words
+/// (`current_user` matches `getCurrentUser`, `me` does not match
+/// `customerDataProvider`). Used for cheap name-based heuristics.
+fn matches_any_token(name: &str, phrases: &[&str]) -> bool {
+    let words = name_words(name);
+    phrases.iter().any(|phrase| {
+        let phrase: Vec<&str> = phrase.split('_').collect();
+        words
+            .windows(phrase.len())
+            .any(|window| window.iter().zip(&phrase).all(|(w, p)| w == p))
+    })
+}
+
+/// Lowercase words of a tool name, split on any non-alphanumeric
+/// character and on camelCase boundaries: `getCurrentUser` and
+/// `get-current_user` both give `[get, current, user]`. Matching on whole
+/// words keeps `me` from matching `customerDataProvider` and `exec` from
+/// matching `execute_insights_query` (both seen in the campaign).
+fn name_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 /// Triple of tool names that look like a create / read / delete trio
@@ -597,6 +633,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn name_words_split_snake_kebab_and_camel_case() {
+        assert_eq!(name_words("getCurrentUser"), ["get", "current", "user"]);
+        assert_eq!(name_words("get-current_user"), ["get", "current", "user"]);
+        assert_eq!(name_words("API-get-self"), ["api", "get", "self"]);
+        assert_eq!(name_words("s3Bucket2List"), ["s3", "bucket2", "list"]);
+    }
+
+    /// Campaign regression: substring matching made `customerDataProvider`
+    /// and `tools_documentation` look like `whoami` tools (the `me` token),
+    /// `execute_insights_query` look like a shell tool (`exec`), and
+    /// `compute_output` look like a mutating tool (`put`).
+    #[test]
+    fn name_heuristics_match_whole_words_only() {
+        let names = |tools: &[&str]| {
+            let tools: Vec<Tool> = tools.iter().map(|n| tool(n, json!({}), None)).collect();
+            suggest_packs(&tools)
+        };
+        for not_auth in ["customerDataProvider", "tools_documentation", "readme_get"] {
+            assert!(
+                !names(&[not_auth]).iter().any(|p| p.pack == "auth"),
+                "`{not_auth}` must not trigger the auth pack"
+            );
+        }
+        for auth in ["getCurrentUser", "get_me", "me", "user_info"] {
+            assert!(
+                names(&[auth]).iter().any(|p| p.pack == "auth"),
+                "`{auth}` should trigger the auth pack"
+            );
+        }
+        assert!(!names(&["execute_insights_query"])
+            .iter()
+            .any(|p| p.pack == "injection-shell"));
+        assert!(names(&["exec"]).iter().any(|p| p.pack == "injection-shell"));
+
+        let path = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let pt = |n: &str| {
+            suggest_packs(&[tool(n, path.clone(), None)])
+                .iter()
+                .any(|p| p.pack == "path-traversal")
+        };
+        assert!(pt("compute_output"), "`put` inside `output` is not a write");
+        assert!(!pt("createDirectory"));
+        assert!(!pt("write_file"));
     }
 
     #[test]
