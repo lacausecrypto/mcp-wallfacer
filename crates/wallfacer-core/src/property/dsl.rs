@@ -44,6 +44,15 @@ pub const MAX_VERSION: u64 = 3;
 /// cannot lock the loader into an unbounded walk.
 pub const MAX_EXTENDS_DEPTH: usize = 4;
 
+/// Largest string a `generate:` spec may ask for (16 MiB): enough to
+/// probe the 10 MiB per-message cap of common SDK transports, bounded so
+/// a typo cannot exhaust memory. Exceeding it is a parse error, never a
+/// silent clamp.
+pub const MAX_GENERATED_STRING_LEN: usize = 16 * 1024 * 1024;
+
+/// Largest array a `generate:` spec may ask for.
+pub const MAX_GENERATED_ITEMS: usize = 1_000_000;
+
 #[derive(Debug, Error)]
 pub enum DslError {
     /// YAML deserialization failed.
@@ -69,6 +78,14 @@ pub enum DslError {
     /// to compile.
     #[error("invalid `where` regex: {0}")]
     InvalidWhereRegex(String),
+    /// A `generate:` spec asks for a string or array past
+    /// [`MAX_GENERATED_STRING_LEN`] / [`MAX_GENERATED_ITEMS`].
+    #[error("invariant `{invariant}`: generate field `{field}` {detail}")]
+    GenerateSpecTooLarge {
+        invariant: String,
+        field: String,
+        detail: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, DslError>;
@@ -147,12 +164,22 @@ pub struct SequenceStep {
     pub bind: Option<String>,
     /// Expected outcome class. `Error` asserts the step *should* fail
     /// (e.g. post-logout, the protected resource must reject the call);
-    /// `Ok` asserts it must succeed. When omitted, the step is a
-    /// precondition: it is expected to succeed, but if it returns
-    /// `isError` the sequence is reported inconclusive (skipped), not
-    /// failed — the setup didn't happen, so nothing was tested.
+    /// `Ok` asserts it must succeed. When omitted, no outcome class is
+    /// enforced and the step's `assert` / `require` lists decide. A step
+    /// with none of `expect`, `require` or `assert` is a setup step: if it
+    /// returns `isError` the sequence is reported inconclusive (skipped),
+    /// not failed — the setup didn't happen, so nothing was tested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<StepOutcome>,
+    /// Explicit precondition: assertions the step's `{input, response}`
+    /// must satisfy for the rest of the sequence to mean anything. When
+    /// one fails, the sequence is reported inconclusive (skipped), not
+    /// failed. Replaces the implicit "must not return isError"
+    /// precondition, so a precondition may itself be a rejection — e.g.
+    /// "the server refuses an absolute path outside its root" before
+    /// testing whether `../` escapes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require: Vec<Assertion>,
     /// Per-step assertions. Evaluated against the same
     /// `{input, response}` context the [`Invariant`] runner uses, so
     /// the existing assertion vocabulary applies unchanged.
@@ -635,8 +662,47 @@ pub fn parse_with_overrides(
         if invariant.generate.is_some() == invariant.fixed.is_some() {
             return Err(DslError::InvalidInputMode(invariant.name.clone()));
         }
+        check_generate_bounds(&invariant.name, invariant.generate.as_ref())?;
+    }
+    for block in &file.for_each_tool {
+        check_generate_bounds(&block.name, block.apply.generate.as_ref())?;
     }
     Ok(file)
+}
+
+fn check_generate_bounds(
+    invariant: &str,
+    generate: Option<&BTreeMap<String, ValueSpec>>,
+) -> Result<()> {
+    for (field, spec) in generate.into_iter().flatten() {
+        check_spec_bounds(spec).map_err(|detail| DslError::GenerateSpecTooLarge {
+            invariant: invariant.to_string(),
+            field: field.clone(),
+            detail,
+        })?;
+    }
+    Ok(())
+}
+
+fn check_spec_bounds(spec: &ValueSpec) -> std::result::Result<(), String> {
+    for length in [spec.min_length, spec.max_length].into_iter().flatten() {
+        if length > MAX_GENERATED_STRING_LEN {
+            return Err(format!(
+                "asks for a {length}-character string; the limit is {MAX_GENERATED_STRING_LEN}"
+            ));
+        }
+    }
+    for count in [spec.min_items, spec.max_items].into_iter().flatten() {
+        if count > MAX_GENERATED_ITEMS {
+            return Err(format!(
+                "asks for {count} array items; the limit is {MAX_GENERATED_ITEMS}"
+            ));
+        }
+    }
+    match spec.items.as_deref() {
+        Some(items) => check_spec_bounds(items),
+        None => Ok(()),
+    }
 }
 
 /// Phase I — synthesises a concrete [`Invariant`] from a

@@ -162,6 +162,12 @@ impl FuzzPlan {
         for tool in tools {
             let tool_name = tool.name.to_string();
             let input_schema = Value::Object((*tool.input_schema).clone());
+            // Formats are checked too: a `format: uri` field fed a
+            // non-URL is an invalid input the server may reject.
+            let input_validator = jsonschema::options()
+                .should_validate_formats(true)
+                .build(&input_schema)
+                .ok();
             // Cache prior corpus entries for THIS tool so the
             // 90/10 split doesn't re-list every iteration.
             let prior_corpus: Vec<FuzzCorpusEntry> = self
@@ -222,7 +228,19 @@ impl FuzzPlan {
                 };
                 let fingerprint = response_fingerprint(&response_value);
 
+                // Adversarial payloads often violate the declared schema
+                // (wrong types, bad formats). An uncompilable schema
+                // can't prove that, so such payloads count as valid.
+                let payload_violates_schema = input_validator
+                    .as_ref()
+                    .is_some_and(|validator| !validator.is_valid(&payload_value));
+
                 let kind_message_details: Option<(FindingKind, &str, String)> = match outcome {
+                    CallOutcome::Ok(result) if crate::canary::leaked_in_result(&result) => Some((
+                        FindingKind::SecretLeak,
+                        "response disclosed the server's environment",
+                        canary_leak_details(&response_value),
+                    )),
                     CallOutcome::Ok(_) => None,
                     CallOutcome::Hang(duration) => Some((
                         FindingKind::Hang {
@@ -247,6 +265,11 @@ impl FuzzPlan {
                     {
                         None
                     }
+                    // Any error reply to a schema-violating payload is a
+                    // rejection, even under a non-standard code (`-32603`
+                    // from a handler that choked on a number where a
+                    // string was declared): the input was invalid.
+                    CallOutcome::JsonRpcError { .. } if payload_violates_schema => None,
                     CallOutcome::JsonRpcError { code, message } => Some((
                         FindingKind::InternalError { code },
                         "tool call failed with a JSON-RPC error",
@@ -290,8 +313,12 @@ impl FuzzPlan {
                             timestamp: chrono::Utc::now(),
                         });
                     }
-                    // An internal-error reply leaves the session intact.
-                    if !matches!(finding.kind, FindingKind::InternalError { .. }) {
+                    // An internal-error reply or a leak leaves the session
+                    // intact.
+                    if !matches!(
+                        finding.kind,
+                        FindingKind::InternalError { .. } | FindingKind::SecretLeak
+                    ) {
                         client.reconnect().await.with_context(|| {
                             format!("failed to reconnect after fault on `{tool_name}`")
                         })?;
@@ -350,6 +377,31 @@ impl FuzzPlan {
         }
         Ok((tools, blocked))
     }
+}
+
+/// Finding details for a canary leak: where the value showed up.
+pub(crate) fn canary_leak_details(response: &Value) -> String {
+    let rendered = serde_json::to_string(response).unwrap_or_default();
+    let excerpt = rendered
+        .find(crate::canary::value())
+        .map(|at| {
+            let start = rendered[..at]
+                .char_indices()
+                .rev()
+                .nth(80)
+                .map_or(0, |(i, _)| i);
+            let end = (at + crate::canary::value().len() + 80).min(rendered.len());
+            let end = (end..=rendered.len())
+                .find(|&i| rendered.is_char_boundary(i))
+                .unwrap_or(rendered.len());
+            &rendered[start..end]
+        })
+        .unwrap_or("");
+    format!(
+        "the value of `{}`, planted in the server's environment and never sent \
+         in any request, appears in the response: …{excerpt}…",
+        crate::canary::ENV_VAR
+    )
 }
 
 #[cfg(test)]
@@ -465,6 +517,114 @@ mod tests {
             FindingKind::InternalError { code: -32603 }
         ));
         assert_eq!(findings[0].severity, crate::finding::Severity::Low);
+    }
+
+    fn text_result(body: String) -> CallOutcome {
+        CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::Content::text(body),
+        ]))
+    }
+
+    /// A tool disclosing the server's environment is reported, and the
+    /// session is kept (the server did not fail).
+    #[tokio::test]
+    async fn fuzz_reports_canary_disclosure() {
+        let tool = make_tool(
+            "debug_env",
+            json!({"type": "object", "properties": {"filter": {"type": "string"}}}),
+        );
+        let mut client = MockClient::new().register(tool, |_args| {
+            text_result(format!(
+                "HOME=/root\n{}={}",
+                crate::canary::ENV_VAR,
+                crate::canary::value()
+            ))
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 1);
+        assert_eq!(client.reconnect_count(), 0);
+        let findings = corpus.list_findings().unwrap();
+        assert!(matches!(findings[0].kind, FindingKind::SecretLeak));
+        assert_eq!(findings[0].severity, crate::finding::Severity::Critical);
+        assert!(findings[0].details.contains(crate::canary::ENV_VAR));
+    }
+
+    /// Campaign regression: echoing a secret-looking *input* back was
+    /// reported as a leak. Reflection of what the client sent is not.
+    #[tokio::test]
+    async fn fuzz_does_not_report_input_reflection() {
+        let tool = make_tool(
+            "maker_status",
+            json!({"type": "object", "properties": {"target_dir": {"type": "string"}}}),
+        );
+        let mut client = MockClient::new().register(tool, |args| {
+            text_result(format!(
+                "status for {args} (Authorization: Bearer abcDEF123456_secret-token-xyz, ${})",
+                crate::canary::ENV_VAR
+            ))
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 0);
+    }
+
+    fn url_tool() -> Tool {
+        make_tool(
+            "fetch_html",
+            json!({
+                "type": "object",
+                "properties": {"url": {"type": "string", "format": "uri"}},
+                "required": ["url"],
+            }),
+        )
+    }
+
+    fn always_internal_error(_args: &Value) -> CallOutcome {
+        CallOutcome::JsonRpcError {
+            code: -32603,
+            message: "Invalid url".to_string(),
+        }
+    }
+
+    /// Campaign regression: servers answered `-32603` to adversarial
+    /// payloads that broke the declared schema (`123` for a string, a
+    /// non-URL for `format: uri`). Rejecting invalid input is correct,
+    /// whatever the code.
+    #[tokio::test]
+    async fn fuzz_ignores_error_replies_to_schema_violating_payloads() {
+        let mut client = MockClient::new().register(url_tool(), always_internal_error);
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let mut adversarial = plan(detector());
+        adversarial.mode = GenMode::Adversarial;
+        adversarial.iterations = 30;
+        let report = adversarial
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 0);
+    }
+
+    /// The same reply to a schema-valid payload is still reported.
+    #[tokio::test]
+    async fn fuzz_reports_error_replies_to_schema_valid_payloads() {
+        let mut client = MockClient::new().register(url_tool(), always_internal_error);
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 1);
     }
 
     #[tokio::test]

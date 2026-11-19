@@ -1,6 +1,6 @@
 # Pack — `path-traversal`
 
-> Probes filesystem-bridging tools for path-traversal escapes.
+> Probes filesystem tools that confine access to a root for path-traversal escapes.
 
 **Tags:** `security`, `filesystem`
 **Authors:** wallfacer-core
@@ -11,45 +11,53 @@
 |---|---|---|---|
 | `path_field` | string | `path` | Name of the path argument on both tools (e.g. `path`, `file_path`). |
 | `read_file_tool` | string | `read_file` | Tool that reads a file by path. |
-| `sensitive_unix_pattern` | string | `(?i)root:.*:/bin/(ba)?sh` | Regex of `/etc/passwd`-style content that must never leak. |
-| `write_file_tool` | string | `write_file` | Tool that writes a file by path. |
+| `sensitive_unix_pattern` | string | `(?m)^root:[^:\n]*:0:0:` | Regex matching `/etc/passwd` content (the root entry). |
+| `write_file_tool` | string | `write_file` | Tool that writes a file by path. Subject to the destructive-tool guard. |
 
-## Invariants
+## Sequences
 
-### `path.dotdot_segments_rejected_by_read_file`
+### `path.dotdot_segments_blocked_by_read_file`
 
-- **Tool:** `read_file`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
+On a server that refuses `/etc/passwd`, `../` segments must not
+reach it either.
+
+1. `read_file` — precondition: any_of(2 child)
+2. `read_file` — assert: any_of(2 child)
+
+- **Test fixtures:** 4 (`pass`, `pass`, `fail`, `inconclusive`)
+
+### `path.url_encoded_dotdot_blocked_by_read_file`
+
+On a server that refuses `/etc/passwd`, a percent-encoded `../`
+must not be decoded and resolved outside the root.
+
+1. `read_file` — precondition: any_of(2 child)
+2. `read_file` — assert: any_of(2 child)
+
+- **Test fixtures:** 3 (`pass`, `fail`, `inconclusive`)
+
+### `path.windows_unc_not_followed_by_read_file`
+
+On a server that refuses `/etc/passwd`, a UNC path must not return
+a remote file. Only observable on Windows hosts: elsewhere the path
+is a plain relative name and the probe passes. Echoing the path back
+("nothing found in \\evilhost\...") is not a failure.
+
+1. `read_file` — precondition: any_of(2 child)
+2. `read_file` — assert: any_of(2 child)
+
 - **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
-### `path.absolute_paths_outside_root_rejected`
+### `path.dotdot_write_escape_blocked`
 
-- **Tool:** `read_file`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 2 (`pass`, `fail`)
+On a server that refuses to write an absolute path outside its
+root, a `../` write must be refused too. Runs only when the write
+tool passes the destructive-tool guard.
 
-### `path.windows_unc_rejected`
+1. `write_file` — precondition: equals(path `$.response.isError` == literal `true`)
+2. `write_file` — expect `error`
 
-- **Tool:** `read_file`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
-- **Test fixtures:** 2 (`pass`, `fail`)
-
-### `path.symlink_escape_rejected_by_write_file`
-
-- **Tool:** `write_file`
-- **Inputs:** fixed (2 field(s))
-- **Assertion summary:** equals(path `$.response.isError` == literal `true`)
-- **Test fixtures:** 2 (`pass`, `fail`)
-
-### `path.url_encoded_traversal_normalised_or_rejected`
-
-- **Tool:** `read_file`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Test fixtures:** 3 (`pass`, `fail`, `inconclusive`)
 
 ## Source
 
@@ -58,12 +66,23 @@ Raw YAML, embedded into the binary at compile time:
 ```yaml
 # Path-traversal rule pack.
 #
-# Probes file-handling tools with classic traversal payloads and asserts
-# the response cannot contain content from outside the intended root.
-# Loadable via: `wallfacer property --pack path-traversal`.
+# A traversal is a defect only on a server that confines file access to
+# a root. Every probe is therefore a two-step sequence:
 #
-# Phase G — v3 with parameters: override the read/write tool names if
-# yours don't match the defaults.
+#   1. Confinement check (`require`): the tool must refuse the absolute
+#      path `/etc/passwd`, or at least not return its content. A server
+#      that serves it has no root to escape (full filesystem access by
+#      design, e.g. a desktop-automation server with no allowed
+#      directories configured): the probe is reported inconclusive, not
+#      as a traversal.
+#   2. Escape attempt: the same file through `../`, an encoded `../`, or
+#      a UNC path must not come back.
+#
+# `/etc/passwd` is used for the check because it is world-readable: a
+# file only root can read (`/etc/shadow`) would be refused by an
+# unconfined server too, faking confinement.
+#
+# Loadable via: `wallfacer property --pack path-traversal`.
 #
 #   [packs.path-traversal]
 #   read_file_tool = "fs_read"
@@ -72,7 +91,7 @@ Raw YAML, embedded into the binary at compile time:
 version: 3
 metadata:
   name: path-traversal
-  description: "Probes filesystem-bridging tools for path-traversal escapes."
+  description: "Probes filesystem tools that confine access to a root for path-traversal escapes."
   authors: ["wallfacer-core"]
   tags: [security, filesystem]
   parameters:
@@ -81,7 +100,7 @@ metadata:
       type: string
       default: "read_file"
     write_file_tool:
-      description: "Tool that writes a file by path."
+      description: "Tool that writes a file by path. Subject to the destructive-tool guard."
       type: string
       default: "write_file"
     path_field:
@@ -89,119 +108,197 @@ metadata:
       type: string
       default: "path"
     sensitive_unix_pattern:
-      description: "Regex of `/etc/passwd`-style content that must never leak."
+      description: "Regex matching `/etc/passwd` content (the root entry)."
       type: string
-      default: "(?i)root:.*:/bin/(ba)?sh"
+      default: '(?m)^root:[^:\n]*:0:0:'
 
-invariants:
-  - name: "path.dotdot_segments_rejected_by_read_file"
-    tool: "{{read_file_tool}}"
-    fixed:
-      "{{path_field}}": "../../../etc/passwd"
-    assert:
-      - kind: any_of
+invariants: []
+
+sequences:
+  - name: "path.dotdot_segments_blocked_by_read_file"
+    description: |
+      On a server that refuses `/etc/passwd`, `../` segments must not
+      reach it either.
+    steps:
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "/etc/passwd" }
+        require:
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '{{sensitive_unix_pattern}}'
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "../../../../../../../../etc/passwd" }
         assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: '{{sensitive_unix_pattern}}'
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '{{sensitive_unix_pattern}}'
     test_fixtures:
-      - name: "passes when traversal is rejected"
-        response: { isError: true, content: [{ type: "text", text: "invalid path" }] }
+      - name: "passes when both paths are refused"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied: outside allowed directories" }] }
+          - { isError: true, content: [{ type: "text", text: "access denied: outside allowed directories" }] }
         expect: pass
-      - name: "passes when path is normalised (no leak)"
-        response: { isError: false, content: [{ type: "text", text: "(empty)" }] }
+      - name: "passes when the traversal is normalised into the root"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: false, content: [{ type: "text", text: "(empty)" }] }
         expect: pass
-      - name: "fails when /etc/passwd leaks"
-        response:
-          isError: false
-          content:
-            - { type: "text", text: "root:x:0:0:root:/root:/bin/bash\nnobody:x:1:1:nobody:/:/bin/sh" }
+      - name: "fails when ../ escapes a root that refuses absolute paths"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: false, content: [{ type: "text", text: "root:x:0:0:root:/root:/bin/ash\nnobody:x:65534:65534:nobody:/:/sbin/nologin" }] }
         expect: fail
+      - name: "inconclusive when the server serves absolute paths (no root)"
+        responses:
+          - { isError: false, content: [{ type: "text", text: "root:x:0:0:root:/root:/bin/bash" }] }
+          - { isError: false, content: [{ type: "text", text: "root:x:0:0:root:/root:/bin/bash" }] }
+        expect: inconclusive
 
-  - name: "path.absolute_paths_outside_root_rejected"
-    tool: "{{read_file_tool}}"
-    fixed:
-      "{{path_field}}": "/etc/shadow"
-    assert:
-      - kind: any_of
+  - name: "path.url_encoded_dotdot_blocked_by_read_file"
+    description: |
+      On a server that refuses `/etc/passwd`, a percent-encoded `../`
+      must not be decoded and resolved outside the root.
+    steps:
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "/etc/passwd" }
+        require:
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '{{sensitive_unix_pattern}}'
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd" }
         assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "(?i)root:|nobody:"
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '{{sensitive_unix_pattern}}'
     test_fixtures:
-      - name: "passes when error returned"
-        response: { isError: true, content: [{ type: "text", text: "access denied" }] }
-        expect: pass
-      - name: "fails when shadow content leaks"
-        response: { isError: false, content: [{ type: "text", text: "root:$6$abcdef:19000:0:99999:7:::" }] }
-        expect: fail
-
-  - name: "path.windows_unc_rejected"
-    tool: "{{read_file_tool}}"
-    fixed:
-      "{{path_field}}": "\\\\evilhost\\share\\hosts"
-    assert:
-      - kind: equals
-        lhs: { path: "$.response.isError" }
-        rhs: { value: true }
-    test_fixtures:
-      - name: "passes when UNC rejected"
-        response: { isError: true }
-        expect: pass
-      - name: "fails when UNC silently followed"
-        response: { isError: false, content: [{ type: "text", text: "127.0.0.1 localhost" }] }
-        expect: fail
-
-  - name: "path.symlink_escape_rejected_by_write_file"
-    tool: "{{write_file_tool}}"
-    fixed:
-      "{{path_field}}": "../escaped.txt"
-      contents: "<wallfacer-secret>"
-    assert:
-      - kind: equals
-        lhs: { path: "$.response.isError" }
-        rhs: { value: true }
-    test_fixtures:
-      - name: "passes when write rejected"
-        response: { isError: true }
-        expect: pass
-      - name: "fails when write succeeds outside root"
-        response: { isError: false, structuredContent: { ok: true } }
-        expect: fail
-
-  - name: "path.url_encoded_traversal_normalised_or_rejected"
-    tool: "{{read_file_tool}}"
-    fixed:
-      "{{path_field}}": "..%2F..%2F..%2Fetc%2Fpasswd"
-    assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: '{{sensitive_unix_pattern}}'
-    test_fixtures:
-      - name: "passes when encoded traversal rejected"
-        response: { isError: true }
+      - name: "passes when the encoded traversal is refused"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: true, content: [{ type: "text", text: "no such file" }] }
         expect: pass
       - name: "fails when decode-then-resolve leaks /etc/passwd"
-        response:
-          isError: false
-          content:
-            - { type: "text", text: "root:x:0:0:root:/root:/bin/bash" }
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: false, content: [{ type: "text", text: "root:x:0:0:root:/root:/bin/bash" }] }
         expect: fail
+      - name: "inconclusive when the server serves absolute paths (no root)"
+        responses:
+          - { isError: false, content: [{ type: "text", text: "root:x:0:0:root:/root:/bin/bash" }] }
+          - { isError: true, content: [{ type: "text", text: "no such file" }] }
+        expect: inconclusive
+
+  - name: "path.windows_unc_not_followed_by_read_file"
+    description: |
+      On a server that refuses `/etc/passwd`, a UNC path must not return
+      a remote file. Only observable on Windows hosts: elsewhere the path
+      is a plain relative name and the probe passes. Echoing the path back
+      ("nothing found in \\evilhost\...") is not a failure.
+    steps:
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "/etc/passwd" }
+        require:
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '{{sensitive_unix_pattern}}'
+      - call: "{{read_file_tool}}"
+        with: { "{{path_field}}": "\\\\evilhost\\share\\hosts" }
+        assert:
+          - kind: any_of
+            assert:
+              - kind: equals
+                lhs: { path: "$.response.isError" }
+                rhs: { value: true }
+              - kind: not
+                assertion:
+                  kind: matches_regex
+                  path: "$.response.content[0].text"
+                  pattern: '127\.0\.0\.1\s+localhost'
+    test_fixtures:
+      - name: "passes when the UNC path is refused"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+        expect: pass
+      - name: "passes when the path is only echoed back"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: false, content: [{ type: "text", text: "No AG Grid installation detected in \\\\evilhost\\share\\hosts" }] }
+        expect: pass
+      - name: "fails when the remote hosts file is returned"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "access denied" }] }
+          - { isError: false, content: [{ type: "text", text: "127.0.0.1       localhost" }] }
+        expect: fail
+
+  - name: "path.dotdot_write_escape_blocked"
+    description: |
+      On a server that refuses to write an absolute path outside its
+      root, a `../` write must be refused too. Runs only when the write
+      tool passes the destructive-tool guard.
+    steps:
+      - call: "{{write_file_tool}}"
+        with:
+          "{{path_field}}": "/tmp/wallfacer-confinement-probe.txt"
+          content: "wallfacer path-traversal probe"
+        require:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+      - call: "{{write_file_tool}}"
+        with:
+          "{{path_field}}": "../wallfacer-escape-probe.txt"
+          content: "wallfacer path-traversal probe"
+        expect: error
+    test_fixtures:
+      - name: "passes when both writes are refused"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "outside allowed directories" }] }
+          - { isError: true, content: [{ type: "text", text: "outside allowed directories" }] }
+        expect: pass
+      - name: "fails when ../ writes outside a root that refuses absolute paths"
+        responses:
+          - { isError: true, content: [{ type: "text", text: "outside allowed directories" }] }
+          - { isError: false, content: [{ type: "text", text: "wrote 30 bytes" }] }
+        expect: fail
+      - name: "inconclusive when the server writes anywhere (no root)"
+        responses:
+          - { isError: false, content: [{ type: "text", text: "wrote 30 bytes" }] }
+          - { isError: false, content: [{ type: "text", text: "wrote 30 bytes" }] }
+        expect: inconclusive
 ```

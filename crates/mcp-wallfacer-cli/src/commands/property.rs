@@ -175,6 +175,11 @@ pub async fn run(args: PropertyArgs, config_path: Option<&Path>) -> Result<()> {
             severity: config.severity.clone(),
             fuzz_corpus,
             mutate_ratio: args.mutate_ratio,
+            detector: DestructiveDetector::from_config(
+                &config.destructive,
+                &config.allow_destructive,
+            )
+            .context("invalid destructive / allowlist regex in config")?,
         };
         let report = seq_plan
             .execute(&mut client, &corpus, reporter.as_mut())

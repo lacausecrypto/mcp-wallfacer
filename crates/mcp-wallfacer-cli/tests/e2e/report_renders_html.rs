@@ -25,7 +25,7 @@ fn run_property_to_seed_corpus(rundir: &std::path::Path) {
         .args([
             "property",
             "--pack",
-            "secrets-leakage",
+            "injection-shell",
             "--seed",
             "0",
             "--cases",
@@ -58,9 +58,9 @@ timeout_ms = 5000
 [output]
 corpus_dir = ".wallfacer/corpus"
 
-[packs.secrets-leakage]
-witness_tool = "bug_log"
-witness_field = "text"
+[packs.injection-shell]
+shell_tool = "run_shell"
+shell_field = "command"
 "#,
             example_dir.to_string_lossy().replace('\\', "/")
         ),
@@ -80,9 +80,12 @@ witness_field = "text"
     assert!(html.contains("<!DOCTYPE html>"), "must be a real HTML doc");
     assert!(html.contains("Summary"), "summary section present");
     assert!(html.contains("Findings"), "findings section present");
+    // Seeded from real findings: the example's `run_shell` is
+    // shell-injectable (an echo tool reflecting secret-looking input used
+    // to serve here, but reflection is no longer reported as a leak).
     assert!(
-        html.contains("bug_log"),
-        "fixture's witness tool must appear in the report"
+        html.contains("run_shell"),
+        "the vulnerable tool must appear in the report"
     );
     // Inline CSS must be present (no external assets in the
     // generated dashboard).

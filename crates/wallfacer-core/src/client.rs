@@ -260,7 +260,10 @@ async fn build_service(target: &Target) -> Result<RunningService<RoleClient, ()>
     let service = match &target.transport {
         TargetTransport::Stdio { command, args, env } => {
             let mut process = Command::new(command);
-            process.args(args).envs(env);
+            process
+                .args(args)
+                .envs(env)
+                .env(crate::canary::ENV_VAR, crate::canary::value());
             let transport = StdioChildTransport::spawn(process).map_err(ClientError::Spawn)?;
             ().serve(transport)
                 .await

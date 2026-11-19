@@ -1,6 +1,6 @@
 # Pack — `secrets-leakage`
 
-> Probes a witness tool to confirm secrets are not echoed in responses.
+> Checks the server never discloses its environment, including by expanding env references in input.
 
 **Tags:** `security`, `secrets`
 **Authors:** wallfacer-core
@@ -9,38 +9,39 @@
 
 | Name | Type | Default | Description |
 |---|---|---|---|
+| `canary_pattern` | string | `wfcanary_[0-9a-f]{32}` | Regex matching any wallfacer canary value. |
 | `witness_field` | string | `text` | Name of the input field that carries the probe string. |
-| `witness_tool` | string | `echo` | Tool that accepts a single string field (`text`/`message`) and returns text content. |
+| `witness_tool` | string | `echo` | Tool that accepts a string field and returns text content. |
 
 ## Invariants
 
-### `secrets.bearer_tokens_not_echoed`
+### `secrets.shell_env_reference_not_expanded`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 4 (`pass`, `pass`, `fail`, `fail`)
 
-### `secrets.api_keys_not_echoed`
-
-- **Tool:** `echo`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
-
-### `secrets.private_paths_not_echoed`
+### `secrets.braced_env_reference_not_expanded`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
 
-### `secrets.env_var_values_not_echoed`
+### `secrets.windows_env_reference_not_expanded`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
+
+### `secrets.js_template_reference_not_evaluated`
+
+- **Tool:** `echo`
+- **Inputs:** fixed (1 field(s))
+- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
+- **Test fixtures:** 2 (`pass`, `fail`)
 
 ## Source
 
@@ -49,149 +50,117 @@ Raw YAML, embedded into the binary at compile time:
 ```yaml
 # Secrets-leakage rule pack.
 #
-# Probes a tool with payloads that look like secrets and asserts the
-# response never echoes them back in plain text. Use a *witness* tool
-# that takes a single string-like input and is NOT meant to reflect it
-# (log_message, translate, search, ...): against a pure `echo` tool every
-# invariant fails by design and the result carries no information.
-# Error envelopes (`isError: true`) quoting the rejected input are not
-# leaks — validators (pydantic, zod) do this — and pass.
+# Wallfacer spawns stdio servers with a canary secret in their
+# environment (`WALLFACER_CANARY_SECRET=wfcanary_<32 hex>`, random per
+# run, never sent in any request). Every runner — fuzz, property,
+# sequences — reports any response containing it as a `secret_leak`
+# finding, whatever tool or input produced it.
+#
+# This pack adds targeted probes: inputs that *reference* the canary by
+# name, so a server that expands environment references in user input
+# (shell `$VAR`, `${VAR}`, Windows `%VAR%`, JavaScript template
+# evaluation) discloses it. Echoing the reference back verbatim is not a
+# leak: the name is not the secret. An error message that quotes the
+# expanded value is a leak, so `isError` replies are checked too.
+#
+# HTTP targets are not spawned by wallfacer: no canary is planted and the
+# probes cannot fire.
 version: 3
 metadata:
   name: secrets-leakage
-  description: "Probes a witness tool to confirm secrets are not echoed in responses."
+  description: "Checks the server never discloses its environment, including by expanding env references in input."
   authors: ["wallfacer-core"]
   tags: [security, secrets]
   parameters:
     witness_tool:
-      description: "Tool that accepts a single string field (`text`/`message`) and returns text content."
+      description: "Tool that accepts a string field and returns text content."
       type: string
       default: "echo"
     witness_field:
       description: "Name of the input field that carries the probe string."
       type: string
       default: "text"
+    canary_pattern:
+      description: "Regex matching any wallfacer canary value."
+      type: string
+      default: "wfcanary_[0-9a-f]{32}"
 
 invariants:
-  - name: "secrets.bearer_tokens_not_echoed"
+  - name: "secrets.shell_env_reference_not_expanded"
     tool: "{{witness_tool}}"
     fixed:
-      "{{witness_field}}": "Authorization: Bearer abcDEF123456_secret-token-xyz"
+      "{{witness_field}}": "$WALLFACER_CANARY_SECRET"
     assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "Bearer\\s+[A-Za-z0-9._\\-]{16,}"
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "{{canary_pattern}}"
     test_fixtures:
-      - name: "passes when a validation error quotes the input"
-        response:
-          isError: true
-          content:
-            - { type: "text", text: "invalid argument: Authorization: Bearer abcDEF123456_secret-token-xyz" }
+      - name: "passes when the reference is echoed verbatim"
+        response: { content: [{ type: "text", text: "you said: $WALLFACER_CANARY_SECRET" }] }
         expect: pass
-      - name: "passes when token redacted/dropped"
-        response: { content: [{ type: "text", text: "ok" }] }
+      - name: "passes when the input is rejected"
+        response: { isError: true, content: [{ type: "text", text: "invalid characters in input" }] }
         expect: pass
-      - name: "fails when bearer is echoed verbatim"
-        response: { content: [{ type: "text", text: "Bearer abcDEF123456_secret-token-xyz" }] }
+      - name: "fails when the reference is expanded"
+        response: { content: [{ type: "text", text: "you said: wfcanary_0123456789abcdef0123456789abcdef" }] }
+        expect: fail
+      - name: "fails when an error quotes the expanded value"
+        response: { isError: true, content: [{ type: "text", text: "no such file: wfcanary_0123456789abcdef0123456789abcdef" }] }
         expect: fail
 
-  - name: "secrets.api_keys_not_echoed"
+  - name: "secrets.braced_env_reference_not_expanded"
     tool: "{{witness_tool}}"
     fixed:
-      "{{witness_field}}": "X-API-Key: wlf_demo_AAAA1111BBBB2222CCCC"
+      "{{witness_field}}": "${WALLFACER_CANARY_SECRET}"
     assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "(?i)wlf_demo_[A-Za-z0-9]{16,}"
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "{{canary_pattern}}"
     test_fixtures:
-      - name: "passes when a validation error quotes the input"
-        response:
-          isError: true
-          content:
-            - { type: "text", text: "invalid argument: X-API-Key: wlf_demo_AAAA1111BBBB2222CCCC" }
+      - name: "passes when the reference is echoed verbatim"
+        response: { content: [{ type: "text", text: "${WALLFACER_CANARY_SECRET}" }] }
         expect: pass
-      - name: "passes when api key dropped"
-        response: { content: [{ type: "text", text: "received" }] }
-        expect: pass
-      - name: "fails when api key reflected"
-        response:
-          content:
-            - { type: "text", text: "you said: wlf_demo_AAAA1111BBBB2222CCCC" }
+      - name: "fails when the reference is expanded"
+        response: { content: [{ type: "text", text: "wfcanary_0123456789abcdef0123456789abcdef" }] }
         expect: fail
 
-  - name: "secrets.private_paths_not_echoed"
+  - name: "secrets.windows_env_reference_not_expanded"
     tool: "{{witness_tool}}"
     fixed:
-      "{{witness_field}}": "/home/alice/.ssh/id_rsa"
+      "{{witness_field}}": "%WALLFACER_CANARY_SECRET%"
     assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "(?i)(?:/home/|/Users/|C:\\\\\\\\Users)[^\\s]+\\.(?:ssh|aws|env)"
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "{{canary_pattern}}"
     test_fixtures:
-      - name: "passes when a validation error quotes the input"
-        response:
-          isError: true
-          content:
-            - { type: "text", text: "invalid argument: /home/alice/.ssh/id_rsa" }
+      - name: "passes when the reference is echoed verbatim"
+        response: { content: [{ type: "text", text: "%WALLFACER_CANARY_SECRET%" }] }
         expect: pass
-      - name: "passes when path scrubbed"
-        response: { content: [{ type: "text", text: "received" }] }
-        expect: pass
-      - name: "fails when ssh key path leaks back"
-        response:
-          content:
-            - { type: "text", text: "found at /home/alice/.ssh/id_rsa" }
+      - name: "fails when the reference is expanded"
+        response: { content: [{ type: "text", text: "wfcanary_0123456789abcdef0123456789abcdef" }] }
         expect: fail
 
-  - name: "secrets.env_var_values_not_echoed"
+  - name: "secrets.js_template_reference_not_evaluated"
     tool: "{{witness_tool}}"
     fixed:
-      "{{witness_field}}": "WALLFACER_REPLAY_PASSWORD=hunter2-supersecret"
+      "{{witness_field}}": "${process.env.WALLFACER_CANARY_SECRET}"
     assert:
-      - kind: any_of
-        assert:
-          - kind: equals
-            lhs: { path: "$.response.isError" }
-            rhs: { value: true }
-          - kind: not
-            assertion:
-              kind: matches_regex
-              path: "$.response.content[0].text"
-              pattern: "(?i)(?:password|secret|token)\\s*[=:]\\s*[A-Za-z0-9._\\-]{6,}"
+      - kind: not
+        assertion:
+          kind: matches_regex
+          path: "$.response.content[0].text"
+          pattern: "{{canary_pattern}}"
     test_fixtures:
-      - name: "passes when a validation error quotes the input"
-        response:
-          isError: true
-          content:
-            - { type: "text", text: "invalid argument: WALLFACER_REPLAY_PASSWORD=hunter2-supersecret" }
+      - name: "passes when the template is echoed verbatim"
+        response: { content: [{ type: "text", text: "${process.env.WALLFACER_CANARY_SECRET}" }] }
         expect: pass
-      - name: "passes when env value dropped"
-        response: { content: [{ type: "text", text: "ok" }] }
-        expect: pass
-      - name: "fails when env reflected"
-        response:
-          content:
-            - { type: "text", text: "WALLFACER_REPLAY_PASSWORD=hunter2-supersecret" }
+      - name: "fails when the template is evaluated"
+        response: { content: [{ type: "text", text: "wfcanary_0123456789abcdef0123456789abcdef" }] }
         expect: fail
 ```

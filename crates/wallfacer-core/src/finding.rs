@@ -35,6 +35,10 @@ pub enum FindingKind {
         code: i32,
     },
     StateLeak,
+    /// A tool response contained the canary secret wallfacer plants in
+    /// the server's environment (see [`crate::canary`]): the server
+    /// discloses its own environment to the client.
+    SecretLeak,
     /// Phase L — a multi-step [`crate::property::dsl::Sequence`]
     /// failed at step `step_index`. Carries enough metadata to point a
     /// human at which step of which sequence broke.
@@ -105,6 +109,7 @@ impl FindingKind {
             FindingKind::SchemaViolation => Severity::Medium,
             FindingKind::PropertyFailure { .. } => Severity::Medium,
             FindingKind::StateLeak => Severity::High,
+            FindingKind::SecretLeak => Severity::Critical,
             FindingKind::SequenceFailure { .. } => Severity::High,
         }
     }
@@ -120,6 +125,7 @@ impl FindingKind {
             FindingKind::SchemaViolation => "schema_violation",
             FindingKind::PropertyFailure { .. } => "property_failure",
             FindingKind::StateLeak => "state_leak",
+            FindingKind::SecretLeak => "secret_leak",
             FindingKind::SequenceFailure { .. } => "sequence_failure",
         }
     }

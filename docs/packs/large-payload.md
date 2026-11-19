@@ -1,6 +1,6 @@
 # Pack — `large-payload`
 
-> Probes a witness tool with oversized strings and arrays.
+> Probes a witness tool with large strings and arrays.
 
 **Tags:** `reliability`, `robustness`
 **Authors:** wallfacer-core
@@ -12,28 +12,28 @@
 | `array_witness_field` | string | `items` | Field name that carries the array payload. |
 | `array_witness_tool` | string | `accumulate` | Tool that accepts an array of integers. |
 | `string_witness_field` | string | `text` | Field name that carries the string payload. |
-| `string_witness_tool` | string | `echo` | Tool that accepts a single string input. |
+| `string_witness_tool` | string | `echo` | Tool that accepts a string input. |
 
 ## Invariants
 
-### `large.string_input_yields_envelope_not_crash`
+### `large.string_64k_yields_envelope`
+
+- **Tool:** `echo`
+- **Inputs:** generated (1 field(s))
+- **Assertion summary:** matches_schema(`$.response`)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+
+### `large.string_1mib_yields_envelope`
 
 - **Tool:** `echo`
 - **Inputs:** generated (1 field(s))
 - **Assertion summary:** matches_schema(`$.response`)
 - **Test fixtures:** 2 (`pass`, `fail`)
 
-### `large.array_input_handled_gracefully`
+### `large.array_10k_items_yields_envelope`
 
 - **Tool:** `accumulate`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** matches_schema(`$.response`)
-- **Test fixtures:** 2 (`pass`, `fail`)
-
-### `large.repeated_string_does_not_break_envelope`
-
-- **Tool:** `echo`
-- **Inputs:** fixed (1 field(s))
+- **Inputs:** generated (1 field(s))
 - **Assertion summary:** matches_schema(`$.response`)
 - **Test fixtures:** 2 (`pass`, `fail`)
 
@@ -44,19 +44,25 @@ Raw YAML, embedded into the binary at compile time:
 ```yaml
 # Large-payload rule pack.
 #
-# Sends oversized inputs (≈10 MB strings, 1M-element arrays) and
-# verifies the server returns a graceful error envelope instead of
-# crashing or hanging. The witness tool should accept either a string
-# (`witness_string_field`) or an array of integers (`witness_array_field`).
+# Sends large but legitimate inputs — 64 KiB and 1 MiB strings, a
+# 10 000-item array — and checks the server answers with a result
+# envelope (an `isError` result or a JSON-RPC error reply both count).
+# A crash or a hang is reported by the runner itself, tagged with the
+# invariant name.
+#
+# Sizes stay under the 10 MiB per-message cap of common SDK stdio
+# transports (the TypeScript SDK closes the session above it): a probe
+# past that cap measures the SDK transport, identically for every server
+# built on it, not the server under test.
 version: 3
 metadata:
   name: large-payload
-  description: "Probes a witness tool with oversized strings and arrays."
+  description: "Probes a witness tool with large strings and arrays."
   authors: ["wallfacer-core"]
   tags: [reliability, robustness]
   parameters:
     string_witness_tool:
-      description: "Tool that accepts a single string input."
+      description: "Tool that accepts a string input."
       type: string
       default: "echo"
     string_witness_field:
@@ -73,7 +79,7 @@ metadata:
       default: "items"
 
 invariants:
-  - name: "large.string_input_yields_envelope_not_crash"
+  - name: "large.string_64k_yields_envelope"
     tool: "{{string_witness_tool}}"
     generate:
       "{{string_witness_field}}":
@@ -87,47 +93,65 @@ invariants:
         schema:
           type: object
           required: [content]
+          properties:
+            content: { type: array }
     test_fixtures:
-      - name: "passes when server returns envelope"
+      - name: "passes when server returns a result"
         response: { content: [{ type: "text", text: "ok" }] }
         expect: pass
-      - name: "fails when content field missing"
+      - name: "passes when server rejects the size"
+        response: { isError: true, content: [{ type: "text", text: "input too long" }] }
+        expect: pass
+      - name: "fails when the envelope loses its content"
         response: { isError: false }
         expect: fail
 
-  - name: "large.array_input_handled_gracefully"
-    tool: "{{array_witness_tool}}"
-    fixed:
-      "{{array_witness_field}}": []
+  - name: "large.string_1mib_yields_envelope"
+    tool: "{{string_witness_tool}}"
+    generate:
+      "{{string_witness_field}}":
+        type: string
+        min_length: 1048576
+        max_length: 1048576
+    cases: 1
     assert:
       - kind: matches_schema
         path: "$.response"
         schema:
           type: object
           required: [content]
+          properties:
+            content: { type: array }
+    test_fixtures:
+      - name: "passes when server returns a result"
+        response: { content: [{ type: "text", text: "ok" }] }
+        expect: pass
+      - name: "fails when the envelope loses its content"
+        response: { structuredContent: { ok: true } }
+        expect: fail
+
+  - name: "large.array_10k_items_yields_envelope"
+    tool: "{{array_witness_tool}}"
+    generate:
+      "{{array_witness_field}}":
+        type: array
+        min_items: 10000
+        max_items: 10000
+        items: { type: integer, min: 0, max: 9 }
+    cases: 1
+    assert:
+      - kind: matches_schema
+        path: "$.response"
+        schema:
+          type: object
+          required: [content]
+          properties:
+            content: { type: array }
     test_fixtures:
       - name: "passes when envelope returned"
-        response: { content: [{ type: "text", text: "0" }], structuredContent: 0 }
+        response: { content: [{ type: "text", text: "45000" }], structuredContent: 45000 }
         expect: pass
       - name: "fails when content field missing"
         response: { structuredContent: 0 }
-        expect: fail
-
-  - name: "large.repeated_string_does_not_break_envelope"
-    tool: "{{string_witness_tool}}"
-    fixed:
-      "{{string_witness_field}}": "AAAAAAAA"
-    assert:
-      - kind: matches_schema
-        path: "$.response"
-        schema:
-          type: object
-          required: [content]
-    test_fixtures:
-      - name: "passes when envelope returned"
-        response: { content: [{ type: "text", text: "ok" }] }
-        expect: pass
-      - name: "fails when missing envelope"
-        response: {}
         expect: fail
 ```

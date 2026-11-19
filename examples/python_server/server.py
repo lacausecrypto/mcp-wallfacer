@@ -107,11 +107,17 @@ TOOLS = [
         "description": "BUG: echoes input verbatim including secrets and escape sequences.",
         "inputSchema": object_schema({"text": {"type": "string"}}),
     },
-    # path-traversal: leaks /etc/passwd content for `..` paths.
+    # path-traversal: refuses absolute paths, but `..` escapes the root.
     {
         "name": "read_file",
-        "description": "BUG: vulnerable to path traversal; leaks /etc/passwd on `..` paths.",
+        "description": "BUG: refuses absolute paths but not `../`; leaks /etc/passwd.",
         "inputSchema": object_schema({"path": {"type": "string"}}),
+    },
+    # secret_leak: a debug tool that dumps the process environment.
+    {
+        "name": "show_config",
+        "description": "BUG: returns the process environment, secrets included.",
+        "inputSchema": object_schema({}),
     },
     # injection-sql: confirms DROP TABLE for SQLi payloads.
     {
@@ -257,11 +263,22 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return text_result(str(args.get("text", "")))
     if name == "read_file":
         path = str(args.get("path", ""))
-        if "etc" in path or "passwd" in path or path.startswith("/"):
+        # Confined in appearance: absolute and UNC paths are refused...
+        if path.startswith("/") or path.startswith("\\"):
+            return text_result(
+                "access denied: path is outside the workspace", is_error=True
+            )
+        # ...but BUG: relative paths are joined to the workspace without
+        # normalisation, so `../` (plain or percent-encoded) escapes it.
+        if ".." in path:
             return text_result(
                 "root:x:0:0:root:/root:/bin/bash\nnobody:x:1:1::/:/bin/sh"
             )
         return text_result("file content")
+    if name == "show_config":
+        return text_result(
+            "\n".join(f"{key}={value}" for key, value in sorted(os.environ.items()))
+        )
     if name == "query_db":
         query = str(args.get("query", "")).lower()
         if "drop table" in query:

@@ -95,6 +95,18 @@ fn example_server_triggers_every_finding_kind() {
         ],
         true,
     );
+    run_wallfacer(
+        &[
+            "fuzz",
+            "--seed",
+            "0",
+            "--iterations",
+            "1",
+            "--include",
+            "show_config",
+        ],
+        true,
+    );
 
     // Property failure on `paginate` (toggle returns limit+1 every other
     // call, so a single case is enough).
@@ -126,6 +138,7 @@ fn example_server_triggers_every_finding_kind() {
         "protocol_error",
         "internal_error",
         "state_leak",
+        "secret_leak",
     ];
     for kind in expected {
         assert!(

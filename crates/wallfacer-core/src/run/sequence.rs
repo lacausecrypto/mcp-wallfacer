@@ -40,14 +40,14 @@ use crate::{
     fuzz_corpus::{response_fingerprint, CorpusTrigger, FuzzCorpus, FuzzCorpusEntry},
     mutate::corpus_mutator,
     property::{
-        dsl::{FixtureExpect, Sequence, SequenceFixture, StepOutcome},
+        dsl::{FixtureExpect, Sequence, SequenceFixture, SequenceStep, StepOutcome},
         jsonpath, runner,
     },
     seed::{derive_seed, derive_seed_canonical},
     target::SeverityConfig,
 };
 
-use super::{exec::McpExec, reporter::Reporter};
+use super::{destructive::DestructiveDetector, exec::McpExec, reporter::Reporter};
 
 /// Outcome of a single sequence run.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -64,6 +64,18 @@ pub struct SequenceReport {
     /// Sequences that could not run to a verdict because a precondition
     /// step failed (see [`crate::property::dsl::SequenceStep::expect`]).
     pub inconclusive: Vec<InconclusiveSequence>,
+    /// Sequences not run because a step calls a tool the destructive
+    /// guard blocks (not in `[allow_destructive]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<BlockedSequence>,
+}
+
+/// One sequence skipped by the destructive-tool guard.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockedSequence {
+    pub sequence: String,
+    /// First blocked tool among the sequence's steps.
+    pub tool: String,
 }
 
 /// One sequence whose setup did not succeed.
@@ -111,6 +123,10 @@ pub struct SequencePlan {
     /// Ignored when [`Self::fuzz_corpus`] is `None` or the per-tool
     /// corpus is empty.
     pub mutate_ratio: f64,
+    /// Destructive-tool guard, applied to every step like the property
+    /// runner applies it to invariants: a sequence touching a blocked
+    /// tool is skipped whole, never half-run.
+    pub detector: DestructiveDetector,
 }
 
 impl SequencePlan {
@@ -132,8 +148,10 @@ impl SequencePlan {
         reporter: &mut dyn Reporter,
     ) -> Result<SequenceReport> {
         let live_tools = client.list_tools().await?;
-        let tool_names: std::collections::BTreeSet<String> =
-            live_tools.iter().map(|t| t.name.to_string()).collect();
+        let tool_index: std::collections::BTreeMap<String, &rmcp::model::Tool> = live_tools
+            .iter()
+            .map(|tool| (tool.name.to_string(), tool))
+            .collect();
 
         let mut report = SequenceReport::default();
 
@@ -167,7 +185,7 @@ impl SequencePlan {
             if let Some(missing) = sequence
                 .steps
                 .iter()
-                .find(|s| !tool_names.contains(&s.call))
+                .find(|s| !tool_index.contains_key(&s.call))
                 .map(|s| s.call.clone())
             {
                 reporter.on_skipped(
@@ -177,6 +195,24 @@ impl SequencePlan {
                 report.skipped_missing_tool.push(SkippedSequence {
                     sequence: sequence.name.clone(),
                     missing_tool: missing,
+                });
+                continue;
+            }
+            if let Some(blocked) = sequence.steps.iter().find_map(|step| {
+                tool_index
+                    .get(&step.call)
+                    .filter(|tool| !self.detector.classify(tool).is_runnable())
+                    .map(|_| step.call.clone())
+            }) {
+                reporter.on_skipped(
+                    &sequence.name,
+                    &format!(
+                        "step calls `{blocked}`, a destructive tool not in [allow_destructive]"
+                    ),
+                );
+                report.blocked.push(BlockedSequence {
+                    sequence: sequence.name.clone(),
+                    tool: blocked,
                 });
                 continue;
             }
@@ -317,7 +353,10 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
         let prior: Vec<FuzzCorpusEntry> = corpus
             .map(|c| c.list(&step.call).unwrap_or_default())
             .unwrap_or_default();
-        let input = if !prior.is_empty() && rng.gen_bool(mutate_ratio.clamp(0.0, 1.0)) {
+        // A `require` step establishes what the rest of the sequence
+        // relies on: it always runs as written, never mutated.
+        let mutable = step.require.is_empty();
+        let input = if mutable && !prior.is_empty() && rng.gen_bool(mutate_ratio.clamp(0.0, 1.0)) {
             // Pick a random corpus entry, mutate it. The seed
             // input is whatever the past run found interesting;
             // current substituted input is ignored on this path
@@ -344,6 +383,20 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
                 };
             }
         };
+
+        if crate::canary::leaked_in(&response.to_string()) {
+            return SequenceOutcome::Fail {
+                step_index,
+                step_call: step.call.clone(),
+                detail: format!(
+                    "step {step_index} (`{}`): {}\ninput: {}",
+                    step.call,
+                    super::fuzz::canary_leak_details(&response),
+                    serde_json::to_string_pretty(&input).unwrap_or_default(),
+                ),
+                last_input: input,
+            };
+        }
 
         // Phase V — fingerprint the response BEFORE we destructure
         // it for outcome / assertion checks below. Save the input
@@ -377,17 +430,12 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             });
         };
 
-        // Outcome class check (Ok / Error). Only matters when `expect`
-        // is set: with the default the runner falls through to the
-        // assertion list.
-        if step.expect.is_none() && check_step_outcome(&response, StepOutcome::Ok).is_some() {
-            return SequenceOutcome::Inconclusive {
-                step_index,
-                reason: format!("`{}` returned isError", step.call),
-            };
+        if let Some(reason) = unmet_precondition(step, &input, &response) {
+            return SequenceOutcome::Inconclusive { step_index, reason };
         }
-        let expected = step.expect.unwrap_or_default();
-        if let Some(detail) = check_step_outcome(&response, expected) {
+        if let Some(detail) =
+            expected_outcome(step).and_then(|expected| check_step_outcome(&response, expected))
+        {
             if let Some(c) = corpus {
                 save_finding(c, &fingerprint, &input);
             }
@@ -445,6 +493,35 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
     }
 
     SequenceOutcome::Pass
+}
+
+/// A setup step declares nothing to check (no `expect`, `require` or
+/// `assert`): it only has to succeed for later steps to mean anything.
+fn is_setup_step(step: &SequenceStep) -> bool {
+    step.expect.is_none() && step.require.is_empty() && step.assertions.is_empty()
+}
+
+/// Returns why the step's precondition does not hold, if it doesn't:
+/// its explicit `require` list, or, for a setup step, not returning
+/// `isError` (the setup didn't happen).
+fn unmet_precondition(step: &SequenceStep, input: &Value, response: &Value) -> Option<String> {
+    if !step.require.is_empty() {
+        return runner::evaluate_step_assertions(&step.require, input.clone(), response.clone())
+            .err()
+            .map(|err| format!("`{}` precondition not met: {err}", step.call));
+    }
+    if is_setup_step(step) && check_step_outcome(response, StepOutcome::Ok).is_some() {
+        return Some(format!("`{}` returned isError", step.call));
+    }
+    None
+}
+
+/// Outcome class the step must match: only an explicit `expect`.
+/// Otherwise the step's assertions (or its precondition) decide, so a
+/// check like "the traversal is refused or leaks nothing" can pass on
+/// an `isError` reply.
+fn expected_outcome(step: &SequenceStep) -> Option<StepOutcome> {
+    step.expect
 }
 
 /// Verifies the step's response matches the declared
@@ -652,7 +729,7 @@ pub fn evaluate_sequence_fixture(
 
     let mut context = SequenceContext::new();
     let mut sequence_failed_at: Option<(usize, String)> = None;
-    let mut inconclusive_at: Option<usize> = None;
+    let mut inconclusive_at: Option<(usize, String)> = None;
 
     for (step_index, step) in sequence.steps.iter().enumerate() {
         let raw_input = step
@@ -672,12 +749,13 @@ pub fn evaluate_sequence_fixture(
         };
         let response = fixture.responses[step_index].clone();
 
-        if step.expect.is_none() && check_step_outcome(&response, StepOutcome::Ok).is_some() {
-            inconclusive_at = Some(step_index);
+        if let Some(reason) = unmet_precondition(step, &input, &response) {
+            inconclusive_at = Some((step_index, reason));
             break;
         }
-        let expected = step.expect.unwrap_or_default();
-        if let Some(detail) = check_step_outcome(&response, expected) {
+        if let Some(detail) =
+            expected_outcome(step).and_then(|expected| check_step_outcome(&response, expected))
+        {
             sequence_failed_at = Some((step_index, format!("outcome mismatch: {detail}")));
             break;
         }
@@ -716,7 +794,7 @@ pub fn evaluate_sequence_fixture(
         let detail = sequence_failed_at
             .map(|(idx, msg)| format!("step {idx}: {msg}"))
             .or_else(|| {
-                inconclusive_at.map(|idx| format!("precondition step {idx} returned isError"))
+                inconclusive_at.map(|(idx, reason)| format!("step {idx} inconclusive: {reason}"))
             })
             .unwrap_or_else(|| "all steps passed".to_string());
         SequenceFixtureOutcome::Mismatch {
@@ -909,6 +987,178 @@ mod tests {
                 panic!("expected inconclusive, got fail: {detail}")
             }
         }
+    }
+
+    fn path_client(
+        absolute: fn(&Value) -> crate::client::CallOutcome,
+        dotdot: fn(&Value) -> crate::client::CallOutcome,
+    ) -> crate::run::exec::MockClient {
+        let tool = rmcp::model::Tool::new(
+            "read_file".to_string(),
+            String::new(),
+            std::sync::Arc::new(serde_json::Map::new()),
+        );
+        crate::run::exec::MockClient::new().register(tool, move |args| {
+            if args["path"] == "/etc/passwd" {
+                absolute(args)
+            } else {
+                dotdot(args)
+            }
+        })
+    }
+
+    fn text(body: &str, is_error: bool) -> crate::client::CallOutcome {
+        let content = vec![rmcp::model::Content::text(body.to_string())];
+        crate::client::CallOutcome::Ok(if is_error {
+            rmcp::model::CallToolResult::error(content)
+        } else {
+            rmcp::model::CallToolResult::success(content)
+        })
+    }
+
+    const PATH_SEQUENCE: &str = r#"
+name: dotdot_blocked
+steps:
+  - call: read_file
+    with: { path: "/etc/passwd" }
+    require:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: "^root:" }
+  - call: read_file
+    with: { path: "../../etc/passwd" }
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: "^root:" }
+"#;
+
+    async fn run_path(client: &mut crate::run::exec::MockClient) -> SequenceOutcome {
+        use rand::SeedableRng;
+        let sequence: Sequence = serde_yaml::from_str(PATH_SEQUENCE).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        run_one_sequence(
+            client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await
+    }
+
+    /// Campaign regression: a server with full filesystem access by
+    /// design was reported for path traversal. With no root to escape,
+    /// the probe proves nothing.
+    #[tokio::test]
+    async fn unmet_require_makes_the_sequence_inconclusive() {
+        let mut client = path_client(
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+        );
+        match run_path(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, reason } => {
+                assert_eq!(step_index, 0);
+                assert!(reason.contains("precondition not met"), "{reason}");
+            }
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
+        }
+    }
+
+    /// A `require` met by a rejection lets the sequence go on, and an
+    /// asserting step passes on `isError` when its assertions allow it.
+    #[tokio::test]
+    async fn rejection_can_satisfy_require_and_assertions() {
+        let mut client = path_client(
+            |_| text("outside allowed directories", true),
+            |_| text("outside allowed directories", true),
+        );
+        assert!(matches!(run_path(&mut client).await, SequenceOutcome::Pass));
+    }
+
+    #[tokio::test]
+    async fn escape_from_a_confined_root_fails() {
+        let mut client = path_client(
+            |_| text("outside allowed directories", true),
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+        );
+        match run_path(&mut client).await {
+            SequenceOutcome::Fail { step_index, .. } => assert_eq!(step_index, 1),
+            SequenceOutcome::Pass => panic!("expected fail, got pass"),
+            SequenceOutcome::Inconclusive { reason, .. } => {
+                panic!("expected fail, got inconclusive: {reason}")
+            }
+        }
+    }
+
+    /// Sequences used to bypass the destructive guard the property runner
+    /// applies to invariants.
+    #[tokio::test]
+    async fn sequence_touching_a_destructive_tool_is_blocked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let (a, b) = (calls.clone(), calls.clone());
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = crate::run::exec::MockClient::new()
+            .register(tool("record_create"), move |_| {
+                a.fetch_add(1, Ordering::SeqCst);
+                text("{}", false)
+            })
+            .register(tool("delete_record"), move |_| {
+                b.fetch_add(1, Ordering::SeqCst);
+                text("{}", false)
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: s\nsteps:\n  - call: record_create\n  - call: delete_record\n    expect: ok\n",
+        )
+        .unwrap();
+        let plan = SequencePlan {
+            sequences: vec![sequence],
+            master_seed: 0,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            severity: SeverityConfig::default(),
+            fuzz_corpus: None,
+            mutate_ratio: 0.0,
+            detector: DestructiveDetector::from_config(
+                &crate::target::DestructiveConfig::default(),
+                &crate::target::AllowDestructiveConfig::default(),
+            )
+            .unwrap(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(report.blocked.len(), 1);
+        assert_eq!(report.blocked[0].tool, "delete_record");
     }
 
     #[test]

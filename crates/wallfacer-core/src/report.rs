@@ -289,6 +289,7 @@ fn format_kind_label(kind: &FindingKind) -> String {
         FindingKind::ProtocolError => "protocol_error".to_string(),
         FindingKind::InternalError { code } => format!("internal_error ({code})"),
         FindingKind::StateLeak => "state_leak".to_string(),
+        FindingKind::SecretLeak => "secret_leak".to_string(),
         FindingKind::SequenceFailure {
             sequence,
             step_index,

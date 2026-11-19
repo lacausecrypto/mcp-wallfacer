@@ -181,6 +181,11 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
         {
             "same internal error".to_string()
         }
+        (FindingKind::SecretLeak, CallOutcome::Ok(result))
+            if wallfacer_core::canary::leaked_in_result(&result) =>
+        {
+            "same secret leak (canary disclosed)".to_string()
+        }
         (_, CallOutcome::Ok(result)) => {
             let value = serde_json::to_value(result).unwrap_or(Value::Null);
             format!("replayed ok: {}", compact_json(&value))

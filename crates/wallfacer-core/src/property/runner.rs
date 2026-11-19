@@ -507,7 +507,7 @@ impl Operand {
 fn boundary_value(spec: &ValueSpec) -> Value {
     match spec.kind {
         ValueKind::String => {
-            let len = spec.max_length.or(spec.min_length).unwrap_or(8).min(1024);
+            let len = spec.max_length.or(spec.min_length).unwrap_or(8);
             Value::String("x".repeat(len))
         }
         ValueKind::Integer => json!(spec.max.or(spec.min).unwrap_or(1)),
@@ -516,7 +516,7 @@ fn boundary_value(spec: &ValueSpec) -> Value {
             .unwrap_or(Value::Null),
         ValueKind::Boolean => Value::Bool(true),
         ValueKind::Array => {
-            let len = spec.max_items.or(spec.min_items).unwrap_or(1).min(64);
+            let len = spec.max_items.or(spec.min_items).unwrap_or(1);
             let item_spec = spec.items.as_deref();
             Value::Array(
                 (0..len)
@@ -531,7 +531,7 @@ fn generated_value(spec: &ValueSpec, rng: &mut impl RngCore) -> Value {
     match spec.kind {
         ValueKind::String => {
             let min = spec.min_length.unwrap_or(0);
-            let max = spec.max_length.unwrap_or(32).max(min).min(1024);
+            let max = spec.max_length.unwrap_or(32).max(min);
             let len = min + (rng.next_u64() as usize % (max - min + 1));
             Value::String("a".repeat(len))
         }
@@ -552,7 +552,7 @@ fn generated_value(spec: &ValueSpec, rng: &mut impl RngCore) -> Value {
         ValueKind::Boolean => Value::Bool((rng.next_u64() & 1) == 0),
         ValueKind::Array => {
             let min = spec.min_items.unwrap_or(0);
-            let max = spec.max_items.unwrap_or(8).max(min).min(64);
+            let max = spec.max_items.unwrap_or(8).max(min);
             let len = min + (rng.next_u64() as usize % (max - min + 1));
             let item_spec = spec.items.as_deref();
             Value::Array(

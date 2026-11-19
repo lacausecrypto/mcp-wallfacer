@@ -10,9 +10,18 @@ pub fn to_sarif(findings: &[Finding], version: &str) -> Value {
         ("property_failure", "Declared property invariant failed"),
         ("protocol_error", "Protocol-level error was observed"),
         (
+            "internal_error",
+            "Tool call failed with a JSON-RPC error on a valid input",
+        ),
+        (
             "state_leak",
             "State was visible across an expected boundary",
         ),
+        (
+            "secret_leak",
+            "Response disclosed a secret from the server's environment",
+        ),
+        ("sequence_failure", "Multi-step sequence invariant failed"),
     ]
     .into_iter()
     .map(|(id, name)| {
@@ -67,6 +76,7 @@ fn rule_id(kind: &FindingKind) -> &'static str {
         FindingKind::ProtocolError => "protocol_error",
         FindingKind::InternalError { .. } => "internal_error",
         FindingKind::StateLeak => "state_leak",
+        FindingKind::SecretLeak => "secret_leak",
         FindingKind::SequenceFailure { .. } => "sequence_failure",
     }
 }

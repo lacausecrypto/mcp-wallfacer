@@ -146,8 +146,22 @@ def structured_result(value: Any, is_error: bool = False) -> Dict[str, Any]:
     }
 
 
+# BUG (opt-in, WALLFACER_FIXTURE_LEAK_ENV): a debug tool that dumps the
+# process environment, secrets included, as seen on real servers.
+SHOW_CONFIG_TOOL = {
+    "name": "show_config",
+    "description": "BUG: returns the process environment, secrets included.",
+    "inputSchema": object_schema({}, []),
+}
+
+
 async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     global COUNTER, STATUS_TOGGLE, PAGINATE_TOGGLE
+
+    if name == "show_config" and os.environ.get("WALLFACER_FIXTURE_LEAK_ENV"):
+        return text_result(
+            "\n".join(f"{key}={value}" for key, value in sorted(os.environ.items()))
+        )
 
     if name == "echo":
         return text_result(str(args.get("text", "")))
@@ -224,7 +238,10 @@ async def handle_request(message: Dict[str, Any]) -> None:
                 "serverInfo": {"name": "buggy-server", "version": "0.1.0"},
             }
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            tools = list(TOOLS)
+            if os.environ.get("WALLFACER_FIXTURE_LEAK_ENV"):
+                tools.append(SHOW_CONFIG_TOOL)
+            result = {"tools": tools}
         elif method in ("resources/list", "prompts/list") and os.environ.get(
             "WALLFACER_FIXTURE_UNIMPLEMENTED_LISTS"
         ):

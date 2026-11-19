@@ -38,6 +38,7 @@ It complements static scanners (Snyk Agent Scan, Cisco MCP Scanner, Enkrypt) by 
 | `ProtocolError` | the exchange breaks: malformed or unexpected JSON-RPC message |
 | `InternalError` | a tool call gets a JSON-RPC error other than a request rejection (`-32603`, server-defined codes): the tool threw on that input. Low severity. `-32600..-32602` replies are correct rejections and are not reported |
 | `StateLeak` | session state visible across the wrong boundary |
+| `SecretLeak` | a response discloses the server's own environment: wallfacer plants a random canary secret (`WALLFACER_CANARY_SECRET`) in every stdio server it spawns, so a match is never input reflection. Critical |
 | `SequenceFailure` | multi-step invariant breaks (e.g. delete-then-read finds the deleted record) |
 
 A demo server with intentional bugs lives at [`examples/python_server/`](examples/python_server/) — running every wallfacer mode against it surfaces every kind above.
@@ -112,14 +113,14 @@ jobs:
 
 | If your server… | Pack | Catches |
 |---|---|---|
-| has any user-facing tool | [`secrets-leakage`](docs/packs/secrets-leakage.md) | bearer / api-key / secret strings echoed in responses |
+| has any user-facing tool | [`secrets-leakage`](docs/packs/secrets-leakage.md) | env references in input (`$VAR`, `${VAR}`, `%VAR%`, JS templates) expanded into the server's secrets |
 | has any user-facing tool | [`unicode`](docs/packs/unicode.md) | RTL override, ZWJ, escape-sequence echoes |
-| has any user-facing tool | [`large-payload`](docs/packs/large-payload.md) | graceful handling of 10 MB strings / 1M items |
+| has any user-facing tool | [`large-payload`](docs/packs/large-payload.md) | graceful handling of 64 KiB / 1 MiB strings and 10k-item arrays |
 | has any user-facing tool | [`error-shape`](docs/packs/error-shape.md) | envelope shape, no stack traces, no internal paths |
 | has any user-facing tool | [`mcp-spec-conformance`](docs/packs/mcp-spec-conformance.md) | wire-format conformance to the MCP spec itself |
 | has authentication (whoami / login) | [`auth`](docs/packs/auth.md) | anonymous rejection, bearer echo, session cookies |
 | has RBAC | [`authorization`](docs/packs/authorization.md) | role filtering, escalation, ACL on resources |
-| bridges to a filesystem | [`path-traversal`](docs/packs/path-traversal.md) | `../`, absolute, UNC, URL-encoded, symlink escapes |
+| bridges to a filesystem | [`path-traversal`](docs/packs/path-traversal.md) | `../`, URL-encoded and UNC escapes from a root the server enforces (servers with full filesystem access by design are reported inconclusive, not vulnerable) |
 | bridges to a database | [`injection-sql`](docs/packs/injection-sql.md) | `'; DROP`, UNION SELECT, comment bypass |
 | spawns processes | [`injection-shell`](docs/packs/injection-shell.md) | `;`, `&&`, backticks, `$(...)` expansion |
 | proxies LLM completions | [`prompt-injection`](docs/packs/prompt-injection.md) | "ignore previous", role override, jailbreak markers |

@@ -119,25 +119,21 @@ fn http_transport_runs_secrets_leakage_pack_against_python_fixture() {
 
     let rundir = tempfile::tempdir().expect("tempdir");
     let report = run_pack_over_http(rundir.path(), port, "secrets-leakage");
+    // The pack really ran against the witness: nothing was skipped as
+    // "not advertised".
+    let skipped = report["skipped"].as_array().cloned().unwrap_or_default();
+    assert!(
+        skipped.is_empty(),
+        "secrets-leakage probes were skipped over HTTP: {skipped:?}"
+    );
+    // Campaign regression: the fixture's `bug_log` echoes its input, and
+    // echoing a secret-looking *input* used to count as a leak. The pack
+    // now looks for the server's own canary secret, which an HTTP target
+    // (not spawned by wallfacer) never holds: an echo is not a finding.
     let findings = report["findings"].as_array().expect("findings array");
     assert!(
-        !findings.is_empty(),
-        "expected secrets-leakage to fire on the HTTP fixture's `bug_log` echo, got {findings:?}"
-    );
-    // Sanity: the same findings must surface as in stdio mode. The
-    // fixture's `bug_log` echoes its input, so any secrets-leakage
-    // probe sees an exact-match echo and the invariant fails.
-    // Invariants in the secrets-leakage pack are namespaced under
-    // `secrets.<...>` (e.g. `secrets.bearer_tokens_not_echoed`), not
-    // `secrets-leakage.*` — match on the actual prefix.
-    let echoed = findings.iter().any(|f| {
-        f["kind"]["invariant"]
-            .as_str()
-            .is_some_and(|name| name.starts_with("secrets."))
-    });
-    assert!(
-        echoed,
-        "expected at least one secrets.* invariant failure, got: {findings:?}"
+        findings.is_empty(),
+        "input reflection reported as a secret leak: {findings:?}"
     );
 }
 

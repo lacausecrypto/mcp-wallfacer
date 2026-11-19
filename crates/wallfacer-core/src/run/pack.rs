@@ -231,6 +231,7 @@ fn resolve_inner(
 
     let mut imported: Vec<crate::property::dsl::Invariant> = Vec::new();
     let mut imported_for_each: Vec<crate::property::dsl::ForEachToolBlock> = Vec::new();
+    let mut imported_sequences: Vec<crate::property::dsl::Sequence> = Vec::new();
     for parent_name in extends {
         if !visited.insert(parent_name.clone()) {
             return Err(PackError::Cycle(parent_name));
@@ -247,6 +248,7 @@ fn resolve_inner(
         visited.remove(&parent_name);
         imported.extend(parent.invariants);
         imported_for_each.extend(parent.for_each_tool);
+        imported_sequences.extend(parent.sequences);
     }
 
     // Imported first, primary last — primary overrides on collision.
@@ -254,6 +256,8 @@ fn resolve_inner(
     file.invariants = imported;
     imported_for_each.append(&mut file.for_each_tool);
     file.for_each_tool = imported_for_each;
+    imported_sequences.append(&mut file.sequences);
+    file.sequences = imported_sequences;
     Ok(file)
 }
 
@@ -281,6 +285,35 @@ mod tests {
                 .map(|(name, source)| ((*name).to_string(), (*source).to_string()))
                 .collect(),
         )
+    }
+
+    /// A meta-pack used to drop its parents' `sequences:` (only
+    /// invariants and for_each_tool blocks were imported), so
+    /// `--pack security` silently lost every path-traversal probe.
+    #[test]
+    fn extends_imports_parent_sequences() {
+        let parent = r#"
+version: 3
+invariants: []
+sequences:
+  - name: parent.seq
+    steps:
+      - call: read_file
+"#;
+        let child = r#"
+version: 3
+metadata:
+  name: child
+  extends: [parent]
+invariants: []
+sequences:
+  - name: child.seq
+    steps:
+      - call: read_file
+"#;
+        let file = resolve(child, &BTreeMap::new(), &loader(&[("parent", parent)])).unwrap();
+        let names: Vec<&str> = file.sequences.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["parent.seq", "child.seq"]);
     }
 
     #[test]

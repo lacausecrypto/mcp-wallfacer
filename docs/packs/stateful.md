@@ -14,6 +14,22 @@
 | `delete_tool` | string | `delete_record` | Tool that deletes a resource by id. |
 | `read_tool` | string | `list_active_users` | Tool that reads a resource by id (or returns isError for missing). |
 
+## Sequences
+
+### `stateful.delete_purges_subsequent_read`
+
+Calls `create_tool`, captures its returned id, calls `delete_tool`
+with that id, then calls `read_tool` with the same id. The read
+MUST fail (isError=true) because the record was just deleted. A
+server that returns the deleted record on read has a state-leak
+bug.
+
+1. `bug_log` — setup
+2. `delete_record` — setup
+3. `list_active_users` — expect `error`
+
+- **Test fixtures:** 3 (`pass`, `inconclusive`, `fail`)
+
 ## Source
 
 Raw YAML, embedded into the binary at compile time:

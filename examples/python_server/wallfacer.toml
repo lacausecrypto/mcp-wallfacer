@@ -44,7 +44,6 @@ shell_field = "command"
 
 [packs.path-traversal]
 read_file_tool = "read_file"
-write_file_tool = "read_file"
 
 # Phase L — point the stateful pack at the record_create / delete /
 # read trio that demonstrates the leaky-delete bug.

@@ -11,6 +11,120 @@ servers run in a network-less sandbox): most findings were false
 positives produced by wallfacer itself, and one class of real failures
 was hidden.
 
+### Fixed — 10 MiB fuzz strings flagged every tool of TypeScript servers
+
+One adversarial string in ten was 10 MiB, exactly the per-message cap of
+the TypeScript SDK's stdio transport, which closes the session above it.
+Every string-taking tool of such a server came out as a hang or a crash:
+380 of the campaign's 421 fuzz hangs. Fuzz strings now top out at 1 MiB
+(`MAX_FUZZ_STRING_LEN`). The transport cap is a property of the SDK, not
+of the server under test, and is no longer probed.
+
+### Fixed — `internal_error` on payloads that violate the declared schema
+
+Adversarial payloads put `123` where a string is declared or a non-URL
+in a `format: uri` field; a server answering `-32603` ("path.includes is
+not a function", "Invalid url") was reported. Fuzz now validates each
+payload against the tool's input schema (formats included): any JSON-RPC
+error reply to a schema-violating payload is a correct rejection, not a
+finding. Replies to schema-valid payloads are still reported.
+
+### Fixed — `property` re-probed tools that had already timed out
+
+A server waiting on credentials hung on every call, and each of its
+invariants re-reported the same hang after burning the full timeout
+(106 hangs for one server). Once a tool times out, its remaining
+invariants are skipped with a reason and listed in
+`PropertyReport.skipped_after_hang`; the hang is reported once.
+
+### Changed — `secrets-leakage` detects real leaks via a canary secret
+
+The pack sent secret-looking strings and failed when the response echoed
+them: any tool quoting its input (a status line repeating a path) was a
+"leak". Wallfacer now spawns every stdio server with
+`WALLFACER_CANARY_SECRET=wfcanary_<32 random hex>` in its environment, a
+value never sent in any request. Fuzz, property and sequence runners
+report any result containing it as the new **`secret_leak`** finding
+kind (critical, SARIF rule `secret_leak`): the server disclosed its own
+environment. `replay`, `corpus replay` and `corpus minimize` reproduce
+it. The rewritten pack probes env-reference expansion (`$VAR`, `${VAR}`,
+`%VAR%`, `${process.env.VAR}`); the old echo invariants
+(`secrets.bearer_tokens_not_echoed`, …) are removed. HTTP targets are not
+spawned by wallfacer, so nothing is planted for them. Wrappers that
+launch the server through `docker run` must forward the variable
+(`-e WALLFACER_CANARY_SECRET`).
+
+### Changed — `path-traversal` only flags servers that enforce a root
+
+Servers with full filesystem access by design (no allowed directory
+configured) were reported for reading `/etc/shadow` and `../etc/passwd`.
+Each probe is now a sequence: a `require` step first checks the read
+tool refuses (or doesn't leak) the absolute path `/etc/passwd`; only
+then is a `../`, encoded `../` or UNC leak a traversal. Without a root,
+the probe is inconclusive. The UNC probe checks for remote content
+instead of demanding `isError` (echoing the path back is not a leak),
+the `/etc/passwd` pattern matches any shell (`/bin/ash` on Alpine), and
+the write probe is gated the same way. Invariants renamed:
+`path.dotdot_segments_blocked_by_read_file`,
+`path.url_encoded_dotdot_blocked_by_read_file`,
+`path.windows_unc_not_followed_by_read_file`,
+`path.dotdot_write_escape_blocked`; `path.absolute_paths_outside_root_rejected`
+became the precondition.
+
+### Added — `require:` preconditions on sequence steps
+
+A list of assertions the step's `{input, response}` must satisfy for the
+rest of the sequence to mean anything; when one fails, the sequence is
+inconclusive. A `require` step is never mutated from the corpus.
+
+### Fixed — sequences bypassed the destructive-tool guard
+
+The property runner skipped invariants on destructive tools outside
+`[allow_destructive]`; sequences called them anyway (`stateful`'s
+`delete_tool`). A sequence with a blocked step is now skipped whole and
+listed in `SequenceReport.blocked`.
+
+### Fixed — meta-packs dropped their parents' sequences
+
+`extends` imported invariants and `for_each_tool` blocks but not
+`sequences`, so `--pack security` silently lost the path-traversal
+probes (as would any meta-pack extending `stateful` or `auth-flow`).
+
+### Fixed — `large-payload` never sent a large payload
+
+The DSL runner clamped generated strings to 1024 characters and arrays
+to 64 items, so the "64 KiB" probe sent 1 KiB and the array probe sent
+`[]`. `generate:` lengths are now honoured up to 16 MiB / 1 000 000
+items, and a spec past those limits is a parse error instead of a silent
+clamp. The pack now sends 64 KiB and 1 MiB strings and a 10 000-item
+integer array; `suggest` picks a tool with an integer-array field as the
+array witness.
+
+### Fixed — `suggest` witness selection
+
+- The witness search gave up on the whole server when the first tool had
+  no `properties`.
+- Hostile probes (`secrets-leakage`, `unicode`, `large-payload`) could
+  target a state-changing tool (`create_scene`); state-changing tools are
+  never witnesses now. Reflectors (`echo`) are a fallback rather than
+  excluded, since no pack flags reflection any more.
+
+### Fixed — SARIF rules missing for emitted rule ids
+
+`internal_error` and `sequence_failure` results referenced rules the
+SARIF `tool.driver.rules` array did not declare.
+
+### Changed — pack docs list sequences
+
+`gen-pack-docs` renders a "Sequences" section (steps with their role:
+setup, precondition, expect, assert).
+
+### Changed — example server
+
+`read_file` now has the realistic traversal bug (refuses absolute paths,
+joins `../` unnormalised) instead of serving every path, and the new
+`show_config` tool demonstrates `secret_leak`.
+
 ### Fixed — JSON-RPC error replies were reported as protocol errors
 
 Any JSON-RPC error a server returned for a tool call (`-32602 invalid
@@ -45,12 +159,17 @@ shows `error` in that column and explains the failure on stderr.
 
 When a precondition step failed (the `stateful` probe's `create` call
 rejecting generic arguments), or a later step referenced a value the
-setup never returned, the sequence was a `sequence_failure`. A step
-without an explicit `expect` is now a precondition: if it returns
-`isError`, or a reference doesn't resolve, the sequence is reported
-inconclusive (skipped, no finding). Explicit `expect` mismatches,
-assertion failures and transport failures still fail it. Sequence
-fixtures accept `expect: inconclusive`.
+setup never returned, the sequence was a `sequence_failure`. A *setup*
+step (no `expect`, `require` or `assert`) that returns `isError`, or a
+reference that doesn't resolve, now makes the sequence inconclusive
+(skipped, no finding). Explicit `expect` mismatches, assertion failures
+and transport failures still fail it. Sequence fixtures accept
+`expect: inconclusive`.
+
+Sequence step semantics, in full: `expect` is the only outcome-class
+check (a step with assertions but no `expect` is decided by its
+assertions alone, so "refused, or leaks nothing" can pass on `isError`);
+the new `require:` list is an explicit precondition (see below).
 
 ### Fixed — more pack and heuristic false positives
 
@@ -101,15 +220,6 @@ against its embedded pack.
 `isError` and `structuredContent` are optional in the MCP spec (absent
 `isError` means `false`). The pack failed every text-only response;
 it now only checks their type when present.
-
-### Fixed — reflection false positives in `secrets-leakage` / `unicode`
-
-Both packs detect the probe string being reflected back. A validation
-error quoting the rejected input (pydantic, zod) is not a leak:
-`secrets-leakage` now passes on `isError: true`, as `unicode` already
-did. `suggest` no longer picks a reflector (`echo`, `ping`, …) as their
-witness, since such a tool fails them by design; when a server only has
-reflectors, the two packs are not suggested.
 
 ### Changed
 

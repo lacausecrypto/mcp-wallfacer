@@ -62,29 +62,41 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
 
     // ---- Always-applicable packs -----------------------------------
     //
-    // `error-shape`, `large-payload`, `secrets-leakage`, `unicode`
-    // probe every server's tools through a witness — they don't have
-    // strong tool-name affinity so we suggest the pack with the first
-    // string-typed tool we find as the witness.
-    //
-    // `secrets-leakage` and `unicode` detect *reflection* of the probe
-    // string, so a tool whose job is to reflect (echo, ping) fails them
-    // by design and tells us nothing: those packs need a non-reflector
-    // witness, and are not suggested when the server has none.
-    let non_reflectors: Vec<Tool> = tools.iter().filter(|t| !is_reflector(t)).cloned().collect();
-    if let Some(witness) = first_string_field(&non_reflectors) {
-        for (pack, field_param, tool_param) in [
-            ("secrets-leakage", "witness_field", "witness_tool"),
-            ("unicode", "witness_field", "witness_tool"),
+    // `secrets-leakage`, `unicode` and `large-payload` probe a server
+    // through one string-taking witness tool. The probes are hostile
+    // inputs, so the witness is never a tool that changes state
+    // (`create_scene`, `write_file`): the probe would create or overwrite
+    // things. Tools whose job is to reflect their input (`echo`) come
+    // last: they are valid witnesses (none of these packs flags
+    // reflection) but exercise less of the server.
+    if let Some(witness) = pick_witness(tools) {
+        for (pack, params) in [
+            ("secrets-leakage", &["witness_tool", "witness_field"][..]),
+            ("unicode", &["witness_tool", "witness_field"][..]),
+            (
+                "large-payload",
+                &["string_witness_tool", "string_witness_field"][..],
+            ),
         ] {
+            let mut param_overrides = BTreeMap::from([
+                (params[0].to_string(), witness.tool.clone()),
+                (params[1].to_string(), witness.field.clone()),
+            ]);
+            if pack == "large-payload" {
+                if let Some(array) = tools
+                    .iter()
+                    .filter(|tool| !is_mutating(tool))
+                    .find_map(integer_array_field)
+                {
+                    param_overrides.insert("array_witness_tool".to_string(), array.tool);
+                    param_overrides.insert("array_witness_field".to_string(), array.field);
+                }
+            }
             emit(
                 PackSuggestion {
                     pack: pack.to_string(),
                     witness_tool: Some(witness.tool.clone()),
-                    param_overrides: BTreeMap::from([
-                        (tool_param.to_string(), witness.tool.clone()),
-                        (field_param.to_string(), witness.field.clone()),
-                    ]),
+                    param_overrides,
                     reason: format!(
                         "tool `{}` accepts a string field `{}` — usable as the {pack} witness",
                         witness.tool, witness.field
@@ -93,25 +105,6 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
                 &mut out,
             );
         }
-    }
-    if let Some(witness) = first_string_field(tools) {
-        emit(
-            PackSuggestion {
-                pack: "large-payload".to_string(),
-                witness_tool: Some(witness.tool.clone()),
-                param_overrides: BTreeMap::from([
-                    ("string_witness_tool".to_string(), witness.tool.clone()),
-                    ("string_witness_field".to_string(), witness.field.clone()),
-                    ("array_witness_tool".to_string(), witness.tool.clone()),
-                    ("array_witness_field".to_string(), witness.field.clone()),
-                ]),
-                reason: format!(
-                    "tool `{}` accepts a string field `{}` — usable as the large-payload witness",
-                    witness.tool, witness.field
-                ),
-            },
-            &mut out,
-        );
     }
 
     // `error-shape` and `tool-annotations` apply globally with no
@@ -179,13 +172,7 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
         // `create_directory` would create directories outside the root.
         // `write_file_tool` keeps its default; the runner skips it when
         // the server does not advertise that tool.
-        let mutating = matches_any_token(
-            name,
-            &[
-                "write", "save", "create", "put", "edit", "append", "move", "rename", "mkdir",
-                "delete", "remove", "upload",
-            ],
-        );
+        let mutating = is_mutating(tool);
         let path_field = first_matching_field(
             &tool.input_schema,
             &["path", "file_path", "filepath", "filename"],
@@ -253,11 +240,9 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
         let prompt_via_desc = description_lower.contains("llm")
             || description_lower.contains("completion")
             || description_lower.contains("language model");
-        if prompt_field.is_some()
-            || (prompt_via_desc && first_string_field(std::slice::from_ref(tool)).is_some())
-        {
+        if prompt_field.is_some() || (prompt_via_desc && string_field(tool).is_some()) {
             let field = prompt_field
-                .or_else(|| first_string_field(std::slice::from_ref(tool)).map(|w| w.field))
+                .or_else(|| string_field(tool).map(|w| w.field))
                 .unwrap_or_else(|| "prompt".to_string());
             emit(
                 PackSuggestion {
@@ -317,29 +302,65 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
     out
 }
 
-/// Lightweight witness reference produced by [`first_string_field`].
+/// Lightweight witness reference produced by [`pick_witness`].
 struct StringWitness {
     tool: String,
     field: String,
 }
 
-/// First tool whose `inputSchema` declares a string-typed property.
-/// Used by the "always-applicable" packs (`secrets-leakage`,
-/// `unicode`, `large-payload`) to pick a default witness.
-fn first_string_field(tools: &[Tool]) -> Option<StringWitness> {
-    for tool in tools {
-        let schema_value = serde_json::to_value(tool.input_schema.as_ref()).ok()?;
-        let props = schema_value.get("properties")?.as_object()?;
-        for (key, val) in props {
-            if val.get("type").and_then(Value::as_str) == Some("string") {
-                return Some(StringWitness {
-                    tool: tool.name.to_string(),
-                    field: key.clone(),
-                });
-            }
-        }
-    }
-    None
+/// First string-typed property of the tool's `inputSchema`, if any.
+fn string_field(tool: &Tool) -> Option<StringWitness> {
+    let schema_value = serde_json::to_value(tool.input_schema.as_ref()).ok()?;
+    let props = schema_value.get("properties")?.as_object()?;
+    props
+        .iter()
+        .find(|(_, val)| val.get("type").and_then(Value::as_str) == Some("string"))
+        .map(|(key, _)| StringWitness {
+            tool: tool.name.to_string(),
+            field: key.clone(),
+        })
+}
+
+/// First property declared as an array of integers or numbers: the
+/// `large-payload` array probe sends 10 000 small integers.
+fn integer_array_field(tool: &Tool) -> Option<StringWitness> {
+    let schema_value = serde_json::to_value(tool.input_schema.as_ref()).ok()?;
+    let props = schema_value.get("properties")?.as_object()?;
+    props
+        .iter()
+        .find(|(_, val)| {
+            val.get("type").and_then(Value::as_str) == Some("array")
+                && matches!(
+                    val.pointer("/items/type").and_then(Value::as_str),
+                    Some("integer" | "number")
+                )
+        })
+        .map(|(key, _)| StringWitness {
+            tool: tool.name.to_string(),
+            field: key.clone(),
+        })
+}
+
+/// Witness for the always-applicable packs: the first non-mutating tool
+/// with a string field, reflectors (`echo`) only when nothing else
+/// qualifies.
+fn pick_witness(tools: &[Tool]) -> Option<StringWitness> {
+    let candidates = || tools.iter().filter(|tool| !is_mutating(tool));
+    candidates()
+        .filter(|tool| !is_reflector(tool))
+        .find_map(string_field)
+        .or_else(|| candidates().find_map(string_field))
+}
+
+/// Name words of tools that create, change or delete state. Probes with
+/// hostile input must not be sent to them.
+const MUTATING_WORDS: &[&str] = &[
+    "write", "save", "create", "put", "edit", "append", "move", "rename", "mkdir", "delete",
+    "remove", "upload", "set", "update", "insert", "drop", "send", "post", "publish",
+];
+
+fn is_mutating(tool: &Tool) -> bool {
+    matches_any_token(&tool.name, MUTATING_WORDS)
 }
 
 /// Returns the first property name in `schema` that matches any of
@@ -364,11 +385,10 @@ fn first_matching_field(schema: &rmcp::model::JsonObject, candidates: &[&str]) -
 /// `ping`, `reverse`). Matched on whole name tokens so `echo_logs`
 /// counts but `checkout` does not.
 fn is_reflector(tool: &Tool) -> bool {
-    const REFLECTORS: &[&str] = &["echo", "ping", "reverse", "repeat", "mirror", "parrot"];
-    tool.name
-        .to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|token| REFLECTORS.contains(&token))
+    matches_any_token(
+        &tool.name,
+        &["echo", "ping", "reverse", "repeat", "mirror", "parrot"],
+    )
 }
 
 /// Returns `true` when `name` contains any of `phrases` as whole words
@@ -559,21 +579,57 @@ mod tests {
     }
 
     #[test]
-    fn reflection_packs_skip_echo_witness() {
+    fn witness_prefers_non_reflectors_and_never_mutates() {
         let text = json!({"type": "object", "properties": {"message": {"type": "string"}}});
+        // A reflector is a valid fallback witness: no pack flags reflection.
         let only_echo = suggest_packs(&[tool("echo", text.clone(), None)]);
-        assert!(!only_echo
-            .iter()
-            .any(|p| p.pack == "secrets-leakage" || p.pack == "unicode"));
-        // large-payload has no reflection premise and keeps echo.
-        assert!(only_echo.iter().any(|p| p.pack == "large-payload"));
+        for pack in ["secrets-leakage", "unicode", "large-payload"] {
+            let s = only_echo.iter().find(|p| p.pack == pack).unwrap();
+            assert_eq!(s.witness_tool.as_deref(), Some("echo"), "{pack}");
+        }
 
         let mixed = suggest_packs(&[
             tool("echo", text.clone(), None),
-            tool("log_message", text, None),
+            tool("createScene", text.clone(), None),
+            tool("log_message", text.clone(), None),
         ]);
         let sl = mixed.iter().find(|p| p.pack == "secrets-leakage").unwrap();
         assert_eq!(sl.witness_tool.as_deref(), Some("log_message"));
+
+        // Campaign regression: hostile probes went to state-changing tools.
+        let only_mutating = suggest_packs(&[tool("create_scene", text, None)]);
+        assert!(!only_mutating
+            .iter()
+            .any(|p| ["secrets-leakage", "unicode", "large-payload"].contains(&p.pack.as_str())));
+    }
+
+    #[test]
+    fn large_payload_gets_a_real_array_witness() {
+        let text = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let ints = json!({"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}}}});
+        let s = suggest_packs(&[tool("search", text.clone(), None), tool("sum", ints, None)]);
+        let lp = s.iter().find(|p| p.pack == "large-payload").unwrap();
+        assert_eq!(lp.param_overrides["array_witness_tool"], "sum");
+        assert_eq!(lp.param_overrides["array_witness_field"], "ids");
+        // Without an integer array the array probe keeps its default
+        // and is skipped as a missing tool, never sent to a string field.
+        let s = suggest_packs(&[tool("search", text, None)]);
+        let lp = s.iter().find(|p| p.pack == "large-payload").unwrap();
+        assert!(!lp.param_overrides.contains_key("array_witness_tool"));
+    }
+
+    /// Campaign regression: a first tool without `properties` made the
+    /// witness search give up on the whole server.
+    #[test]
+    fn witness_search_skips_tools_without_properties() {
+        let text = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+        let s = suggest_packs(&[
+            tool("list_all", json!({}), None),
+            tool("search", text, None),
+        ]);
+        let sl = s.iter().find(|p| p.pack == "secrets-leakage").unwrap();
+        assert_eq!(sl.witness_tool.as_deref(), Some("search"));
     }
 
     #[test]

@@ -51,6 +51,9 @@ pub enum ShrinkTargetKind {
     /// Original finding was an InternalError. Predicate matches when
     /// the candidate gets a JSON-RPC error reply with the same code.
     InternalError(i32),
+    /// Original finding was a SecretLeak. Predicate matches when the
+    /// candidate's result still contains the canary secret.
+    SecretLeak,
     /// Original finding's kind doesn't have a clean transport-
     /// level signal (PropertyFailure / SchemaViolation /
     /// SequenceFailure). The shrinker treats *any* non-clean
@@ -67,6 +70,7 @@ impl ShrinkTargetKind {
             FindingKind::Hang { .. } => Self::Hang,
             FindingKind::ProtocolError => Self::ProtocolError,
             FindingKind::InternalError { code } => Self::InternalError(*code),
+            FindingKind::SecretLeak => Self::SecretLeak,
             _ => Self::AnyNonOk,
         }
     }
@@ -79,6 +83,7 @@ impl ShrinkTargetKind {
             (Self::Hang, CallOutcome::Hang(_)) => true,
             (Self::ProtocolError, CallOutcome::ProtocolError(_)) => true,
             (Self::InternalError(want), CallOutcome::JsonRpcError { code, .. }) => *code == want,
+            (Self::SecretLeak, CallOutcome::Ok(result)) => crate::canary::leaked_in_result(result),
             (Self::AnyNonOk, CallOutcome::Ok(_)) => false,
             (Self::AnyNonOk, _) => true,
             _ => false,

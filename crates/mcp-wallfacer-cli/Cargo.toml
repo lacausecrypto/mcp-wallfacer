@@ -128,3 +128,7 @@ path = "tests/e2e/torture_under_http_faults.rs"
 [[test]]
 name = "flakiness_aggregate"
 path = "tests/e2e/flakiness_aggregate.rs"
+
+[[test]]
+name = "secret_leak_detected"
+path = "tests/e2e/secret_leak_detected.rs"

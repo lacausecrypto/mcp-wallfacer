@@ -45,6 +45,11 @@ pub struct PropertyReport {
     /// pack parameter or accept the gap.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_tools: Vec<MissingTool>,
+    /// Invariants not evaluated because their tool had already timed out
+    /// earlier in the run (the hang itself is reported once, as a
+    /// finding).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_after_hang: Vec<String>,
 }
 
 /// One invariant skipped because its target tool is not advertised by
@@ -233,8 +238,27 @@ impl PropertyPlan {
             missing_tools,
             ..PropertyReport::default()
         };
+        // Tools that already timed out in this run. Every further probe
+        // of such a tool would most likely burn the full timeout again
+        // and re-report the same hang under another invariant name.
+        let mut unresponsive: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for invariant in &runnable_invariants {
             let cases = invariant.cases.unwrap_or(self.default_cases).max(1);
+            if unresponsive.contains(&invariant.tool) {
+                reporter.on_skipped(
+                    &invariant.tool,
+                    &format!(
+                        "timed out earlier in this run (invariant `{}` not evaluated)",
+                        invariant.name
+                    ),
+                );
+                report.skipped_after_hang.push(invariant.name.clone());
+                for case_index in 0..cases {
+                    reporter.on_iteration_end(&invariant.tool, case_index as u64);
+                }
+                continue;
+            }
             for case_index in 0..cases {
                 reporter.on_iteration_start(&invariant.tool, case_index as u64);
                 let seed = derive_seed(self.master_seed, &invariant.name, case_index as u64);
@@ -262,6 +286,16 @@ impl PropertyPlan {
                 let live_tool = tool_index.get(&invariant.tool).copied();
                 let failure =
                     match invoke(client, &invariant.tool, input.clone(), self.timeout).await {
+                        Ok(response) if crate::canary::leaked_in(&response.to_string()) => Some((
+                            FindingKind::SecretLeak,
+                            "response disclosed the server's environment",
+                            format!(
+                                "{} (invariant `{}`)\ninput: {}",
+                                super::fuzz::canary_leak_details(&response),
+                                invariant.name,
+                                serde_json::to_string_pretty(&input).unwrap_or_default(),
+                            ),
+                        )),
                         Ok(response) => runner::evaluate_with_tool(
                             invariant,
                             input.clone(),
@@ -308,10 +342,15 @@ impl PropertyPlan {
                     if let Some(override_sev) = self.severity.resolve(finding.kind.keyword()) {
                         finding = finding.with_severity(override_sev);
                     }
+                    if matches!(finding.kind, FindingKind::Hang { .. }) {
+                        unresponsive.insert(invariant.tool.clone());
+                    }
                     corpus.write_finding(&finding)?;
                     reporter.on_finding(&finding);
                     report.findings_count += 1;
-                    reporter.on_iteration_end(&invariant.tool, case_index as u64);
+                    for remaining in case_index..cases {
+                        reporter.on_iteration_end(&invariant.tool, remaining as u64);
+                    }
                     break;
                 }
                 reporter.on_iteration_end(&invariant.tool, case_index as u64);
@@ -545,6 +584,68 @@ mod tests {
 
     fn ok_call(_args: &Value) -> CallOutcome {
         CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+    }
+
+    /// Campaign regression: a server waiting on credentials hung on every
+    /// call, and each of its ~40 invariants re-reported the same hang
+    /// after burning the full timeout.
+    #[tokio::test]
+    async fn tool_that_timed_out_is_not_probed_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let mut client = MockClient::new()
+            .register(tool("list_apps"), move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                CallOutcome::Hang(Duration::from_secs(1))
+            })
+            .register(tool("ping"), |_| CallOutcome::Hang(Duration::from_secs(1)));
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: first
+    tool: list_apps
+    fixed: { space: "a" }
+    assert: []
+  - name: second
+    tool: list_apps
+    fixed: { space: "b" }
+    assert: []
+  - name: other_tool
+    tool: ping
+    fixed: {}
+    assert: []
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 3,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.skipped_after_hang, vec!["second".to_string()]);
+        // A hang on one tool does not silence the others.
+        assert_eq!(report.findings_count, 2);
     }
 
     fn for_each_file() -> dsl::InvariantFile {
