@@ -17,8 +17,13 @@ One adversarial string in ten was 10 MiB, exactly the per-message cap of
 the TypeScript SDK's stdio transport, which closes the session above it.
 Every string-taking tool of such a server came out as a hang or a crash:
 380 of the campaign's 421 fuzz hangs. Fuzz strings now top out at 1 MiB
-(`MAX_FUZZ_STRING_LEN`). The transport cap is a property of the SDK, not
-of the server under test, and is no longer probed.
+(`MAX_FUZZ_STRING_LEN`), and the long strings (> 1 KiB) of one payload
+share a 2 MiB budget (`MAX_FUZZ_LONG_STRING_BYTES`): a 100-item array of
+objects otherwise gave every string field its own 1 MiB value (15 MiB
+seen on a crawl tool). Strings past the budget are truncated to 1 KiB and
+the cut is recorded in the finding's composition trail. The transport cap
+is a property of the SDK, not of the server under test, and is no longer
+probed.
 
 ### Fixed — `internal_error` on payloads that violate the declared schema
 

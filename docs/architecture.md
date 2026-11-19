@@ -120,9 +120,9 @@ let report = plan.execute(&mut client, &corpus, &mut reporter).await?;
      codes) to a schema-valid payload, an `InternalError { code }`
      finding (low severity) is recorded without reconnecting: the
      session is still healthy.
-   - Generated strings top out at 1 MiB: past the 10 MiB per-message
-     cap of common SDK stdio transports, a payload tests the transport,
-     not the tool.
+   - Generated strings top out at 1 MiB, and a payload's long strings
+     share a 2 MiB budget: past the 10 MiB per-message cap of common SDK
+     stdio transports, a payload tests the transport, not the tool.
    - `property` and sequences evaluate a JSON-RPC error reply as an
      `isError: true` result (it is a rejection); hang, crash and
      protocol error are reported as their own finding kinds and never

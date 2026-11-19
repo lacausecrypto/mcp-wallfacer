@@ -191,7 +191,7 @@ impl FuzzPlan {
                 let use_mutation = !prior_corpus.is_empty()
                     && self.fuzz_corpus.is_some()
                     && rng.gen_bool(self.mutate_ratio.clamp(0.0, 1.0));
-                let (payload_value, payload_trail): (Value, Vec<String>) = if use_mutation {
+                let (mut payload_value, mut payload_trail): (Value, Vec<String>) = if use_mutation {
                     let pick = &prior_corpus[rng.gen_range(0..prior_corpus.len())];
                     let mutated = corpus_mutator::mutate(&pick.input, &mut rng);
                     (mutated, vec!["mutated from corpus seed".to_string()])
@@ -214,6 +214,13 @@ impl FuzzPlan {
                         }
                     }
                 };
+
+                if crate::mutate::strategies::cap_long_strings(&mut payload_value) {
+                    payload_trail.push(format!(
+                        "long strings truncated to the {} byte payload budget",
+                        crate::mutate::strategies::MAX_FUZZ_LONG_STRING_BYTES
+                    ));
+                }
 
                 let outcome = client
                     .call_tool(&tool_name, payload_value.clone(), self.timeout)
@@ -571,6 +578,44 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let corpus = Corpus::new(tmp.path().join("corpus"));
         let report = plan(detector())
+            .execute(&mut client, &corpus, &mut NoopReporter)
+            .await
+            .unwrap();
+        assert_eq!(report.findings_count, 0);
+    }
+
+    /// Campaign regression: each string of a 100-item array of objects
+    /// got its own 1 MiB value, so a crawl tool received 15 MiB and the TS
+    /// SDK closed the session (reported as a crash of the tool).
+    #[tokio::test]
+    async fn adversarial_payloads_stay_under_the_transport_cap() {
+        let tool = make_tool(
+            "firecrawl_crawl",
+            json!({
+                "type": "object",
+                "properties": {"actions": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {
+                        "script": {"type": "string"},
+                        "selector": {"type": "string"},
+                        "key": {"type": "string"},
+                    }},
+                }},
+            }),
+        );
+        let mut client = MockClient::new().register(tool, |args| {
+            if serde_json::to_string(args).unwrap().len() > 10 * 1024 * 1024 {
+                CallOutcome::Crash("ReadBuffer exceeded maximum size".to_string())
+            } else {
+                text_result("ok".to_string())
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let mut adversarial = plan(detector());
+        adversarial.mode = GenMode::Adversarial;
+        adversarial.iterations = 40;
+        let report = adversarial
             .execute(&mut client, &corpus, &mut NoopReporter)
             .await
             .unwrap();
