@@ -302,7 +302,21 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             substituted.clone()
         };
 
-        let response = invoke(client, &step.call, input.clone(), timeout, rng).await;
+        let response = match invoke(client, &step.call, input.clone(), timeout, rng).await {
+            Ok(response) => response,
+            Err(transport) => {
+                return SequenceOutcome::Fail {
+                    step_index,
+                    step_call: step.call.clone(),
+                    detail: format!(
+                        "step {step_index} (`{}`) transport failure: {transport}\ninput: {}",
+                        step.call,
+                        serde_json::to_string_pretty(&input).unwrap_or_default(),
+                    ),
+                    last_input: input,
+                };
+            }
+        };
 
         // Phase V — fingerprint the response BEFORE we destructure
         // it for outcome / assertion checks below. Save the input
@@ -429,27 +443,23 @@ fn check_step_outcome(response: &Value, expected: StepOutcome) -> Option<String>
 /// Per-call invoke wrapper. Mirrors the property runner's
 /// `invoke()` but **does not reconnect** on failure: sequences depend
 /// on per-connection state surviving across steps.
+///
+/// A hang, crash or protocol error is returned as `Err` and fails the
+/// sequence. It must never be rewritten into an `isError: true`
+/// envelope: a step that `expect: error` would then count a crashed
+/// server as the expected rejection.
 async fn invoke<C: McpExec + ?Sized>(
     client: &mut C,
     tool: &str,
     input: Value,
     timeout: Duration,
     _rng: &mut ChaCha20Rng,
-) -> Value {
+) -> std::result::Result<Value, String> {
     match client.call_tool(tool, input, timeout).await {
-        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
-        CallOutcome::Hang(duration) => json!({
-            "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-            "isError": true,
-        }),
-        CallOutcome::Crash(reason) => json!({
-            "content": [{"type": "text", "text": reason}],
-            "isError": true,
-        }),
-        CallOutcome::ProtocolError(message) => json!({
-            "content": [{"type": "text", "text": message}],
-            "isError": true,
-        }),
+        CallOutcome::Ok(result) => Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+        CallOutcome::Hang(duration) => Err(format!("hang: no response after {duration:?}")),
+        CallOutcome::Crash(reason) => Err(format!("crash: {reason}")),
+        CallOutcome::ProtocolError(message) => Err(format!("protocol error: {message}")),
     }
 }
 
@@ -688,6 +698,55 @@ fn single_placeholder(raw: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Regression: a crashed server used to be rewritten into an
+    /// `isError: true` envelope, which satisfied `expect: error` and
+    /// let the sequence pass.
+    #[tokio::test]
+    async fn crash_on_expect_error_step_fails_the_sequence() {
+        use crate::client::CallOutcome;
+        use crate::run::exec::MockClient;
+        use rand::SeedableRng;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = MockClient::new()
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| {
+                CallOutcome::Crash("process exited".to_string())
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: deleted_record_is_gone\nsteps:\n  - call: record_delete\n  - call: record_read\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        let outcome = run_one_sequence(
+            &mut client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await;
+        match outcome {
+            SequenceOutcome::Fail {
+                step_index, detail, ..
+            } => {
+                assert_eq!(step_index, 1);
+                assert!(detail.contains("crash: process exited"), "{detail}");
+            }
+            SequenceOutcome::Pass => panic!("crashed step must not satisfy `expect: error`"),
+        }
+    }
 
     #[test]
     fn single_placeholder_preserves_type() {

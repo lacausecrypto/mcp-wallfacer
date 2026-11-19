@@ -18,29 +18,29 @@
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
 ### `secrets.api_keys_not_echoed`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
 ### `secrets.private_paths_not_echoed`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
 ### `secrets.env_var_values_not_echoed`
 
 - **Tool:** `echo`
 - **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
-- **Test fixtures:** 2 (`pass`, `fail`)
+- **Assertion summary:** any_of(2 child)
+- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
 
 ## Source
 
@@ -51,9 +51,11 @@ Raw YAML, embedded into the binary at compile time:
 #
 # Probes a tool with payloads that look like secrets and asserts the
 # response never echoes them back in plain text. Use a *witness* tool
-# that takes a single string-like input — typically a generic
-# string-processing endpoint your server exposes (echo, log_message,
-# translate, ...).
+# that takes a single string-like input and is NOT meant to reflect it
+# (log_message, translate, search, ...): against a pure `echo` tool every
+# invariant fails by design and the result carries no information.
+# Error envelopes (`isError: true`) quoting the rejected input are not
+# leaks — validators (pydantic, zod) do this — and pass.
 version: 3
 metadata:
   name: secrets-leakage
@@ -76,12 +78,23 @@ invariants:
     fixed:
       "{{witness_field}}": "Authorization: Bearer abcDEF123456_secret-token-xyz"
     assert:
-      - kind: not
-        assertion:
-          kind: matches_regex
-          path: "$.response.content[0].text"
-          pattern: "Bearer\\s+[A-Za-z0-9._\\-]{16,}"
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "Bearer\\s+[A-Za-z0-9._\\-]{16,}"
     test_fixtures:
+      - name: "passes when a validation error quotes the input"
+        response:
+          isError: true
+          content:
+            - { type: "text", text: "invalid argument: Authorization: Bearer abcDEF123456_secret-token-xyz" }
+        expect: pass
       - name: "passes when token redacted/dropped"
         response: { content: [{ type: "text", text: "ok" }] }
         expect: pass
@@ -94,12 +107,23 @@ invariants:
     fixed:
       "{{witness_field}}": "X-API-Key: wlf_demo_AAAA1111BBBB2222CCCC"
     assert:
-      - kind: not
-        assertion:
-          kind: matches_regex
-          path: "$.response.content[0].text"
-          pattern: "(?i)wlf_demo_[A-Za-z0-9]{16,}"
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)wlf_demo_[A-Za-z0-9]{16,}"
     test_fixtures:
+      - name: "passes when a validation error quotes the input"
+        response:
+          isError: true
+          content:
+            - { type: "text", text: "invalid argument: X-API-Key: wlf_demo_AAAA1111BBBB2222CCCC" }
+        expect: pass
       - name: "passes when api key dropped"
         response: { content: [{ type: "text", text: "received" }] }
         expect: pass
@@ -114,12 +138,23 @@ invariants:
     fixed:
       "{{witness_field}}": "/home/alice/.ssh/id_rsa"
     assert:
-      - kind: not
-        assertion:
-          kind: matches_regex
-          path: "$.response.content[0].text"
-          pattern: "(?i)(?:/home/|/Users/|C:\\\\\\\\Users)[^\\s]+\\.(?:ssh|aws|env)"
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)(?:/home/|/Users/|C:\\\\\\\\Users)[^\\s]+\\.(?:ssh|aws|env)"
     test_fixtures:
+      - name: "passes when a validation error quotes the input"
+        response:
+          isError: true
+          content:
+            - { type: "text", text: "invalid argument: /home/alice/.ssh/id_rsa" }
+        expect: pass
       - name: "passes when path scrubbed"
         response: { content: [{ type: "text", text: "received" }] }
         expect: pass
@@ -134,12 +169,23 @@ invariants:
     fixed:
       "{{witness_field}}": "WALLFACER_REPLAY_PASSWORD=hunter2-supersecret"
     assert:
-      - kind: not
-        assertion:
-          kind: matches_regex
-          path: "$.response.content[0].text"
-          pattern: "(?i)(?:password|secret|token)\\s*[=:]\\s*[A-Za-z0-9._\\-]{6,}"
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion:
+              kind: matches_regex
+              path: "$.response.content[0].text"
+              pattern: "(?i)(?:password|secret|token)\\s*[=:]\\s*[A-Za-z0-9._\\-]{6,}"
     test_fixtures:
+      - name: "passes when a validation error quotes the input"
+        response:
+          isError: true
+          content:
+            - { type: "text", text: "invalid argument: WALLFACER_REPLAY_PASSWORD=hunter2-supersecret" }
+        expect: pass
       - name: "passes when env value dropped"
         response: { content: [{ type: "text", text: "ok" }] }
         expect: pass

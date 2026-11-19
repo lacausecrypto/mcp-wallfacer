@@ -9,6 +9,7 @@
 
 | Name | Type | Default | Description |
 |---|---|---|---|
+| `path_field` | string | `path` | Name of the path argument on both tools (e.g. `path`, `file_path`). |
 | `read_file_tool` | string | `read_file` | Tool that reads a file by path. |
 | `sensitive_unix_pattern` | string | `(?i)root:.*:/bin/(ba)?sh` | Regex of `/etc/passwd`-style content that must never leak. |
 | `write_file_tool` | string | `write_file` | Tool that writes a file by path. |
@@ -67,6 +68,7 @@ Raw YAML, embedded into the binary at compile time:
 #   [packs.path-traversal]
 #   read_file_tool = "fs_read"
 #   write_file_tool = "fs_write"
+#   path_field = "file_path"
 version: 3
 metadata:
   name: path-traversal
@@ -82,6 +84,10 @@ metadata:
       description: "Tool that writes a file by path."
       type: string
       default: "write_file"
+    path_field:
+      description: "Name of the path argument on both tools (e.g. `path`, `file_path`)."
+      type: string
+      default: "path"
     sensitive_unix_pattern:
       description: "Regex of `/etc/passwd`-style content that must never leak."
       type: string
@@ -91,7 +97,7 @@ invariants:
   - name: "path.dotdot_segments_rejected_by_read_file"
     tool: "{{read_file_tool}}"
     fixed:
-      path: "../../../etc/passwd"
+      "{{path_field}}": "../../../etc/passwd"
     assert:
       - kind: any_of
         assert:
@@ -120,7 +126,7 @@ invariants:
   - name: "path.absolute_paths_outside_root_rejected"
     tool: "{{read_file_tool}}"
     fixed:
-      path: "/etc/shadow"
+      "{{path_field}}": "/etc/shadow"
     assert:
       - kind: any_of
         assert:
@@ -143,7 +149,7 @@ invariants:
   - name: "path.windows_unc_rejected"
     tool: "{{read_file_tool}}"
     fixed:
-      path: "\\\\evilhost\\share\\hosts"
+      "{{path_field}}": "\\\\evilhost\\share\\hosts"
     assert:
       - kind: equals
         lhs: { path: "$.response.isError" }
@@ -159,7 +165,7 @@ invariants:
   - name: "path.symlink_escape_rejected_by_write_file"
     tool: "{{write_file_tool}}"
     fixed:
-      path: "../escaped.txt"
+      "{{path_field}}": "../escaped.txt"
       contents: "<wallfacer-secret>"
     assert:
       - kind: equals
@@ -176,7 +182,7 @@ invariants:
   - name: "path.url_encoded_traversal_normalised_or_rejected"
     tool: "{{read_file_tool}}"
     fixed:
-      path: "..%2F..%2F..%2Fetc%2Fpasswd"
+      "{{path_field}}": "..%2F..%2F..%2Fetc%2Fpasswd"
     assert:
       - kind: any_of
         assert:

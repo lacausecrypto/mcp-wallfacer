@@ -66,7 +66,13 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
     // probe every server's tools through a witness — they don't have
     // strong tool-name affinity so we suggest the pack with the first
     // string-typed tool we find as the witness.
-    if let Some(witness) = first_string_field(tools) {
+    //
+    // `secrets-leakage` and `unicode` detect *reflection* of the probe
+    // string, so a tool whose job is to reflect (echo, ping) fails them
+    // by design and tells us nothing: those packs need a non-reflector
+    // witness, and are not suggested when the server has none.
+    let non_reflectors: Vec<Tool> = tools.iter().filter(|t| !is_reflector(t)).cloned().collect();
+    if let Some(witness) = first_string_field(&non_reflectors) {
         for (pack, field_param, tool_param) in [
             ("secrets-leakage", "witness_field", "witness_tool"),
             ("unicode", "witness_field", "witness_tool"),
@@ -87,6 +93,8 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
                 &mut out,
             );
         }
+    }
+    if let Some(witness) = first_string_field(tools) {
         emit(
             PackSuggestion {
                 pack: "large-payload".to_string(),
@@ -165,18 +173,30 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
             );
         }
 
-        // Path traversal — schema has `path` / `file_path` / `filepath` field
-        if let Some(field) = first_matching_field(
+        // Path traversal — schema has `path` / `file_path` / `filepath`
+        // field. Only non-mutating tools become the read witness: the
+        // pack sends traversal paths, and pointing it at
+        // `create_directory` would create directories outside the root.
+        // `write_file_tool` keeps its default; the runner skips it when
+        // the server does not advertise that tool.
+        let mutating = matches_any_token(
+            &lower_name,
+            &[
+                "write", "save", "create", "put", "edit", "append", "move", "rename", "mkdir",
+                "delete", "remove", "upload",
+            ],
+        );
+        let path_field = first_matching_field(
             &tool.input_schema,
             &["path", "file_path", "filepath", "filename"],
-        ) {
+        );
+        if let (Some(field), false) = (path_field, mutating) {
             emit(
                 PackSuggestion {
                     pack: "path-traversal".to_string(),
                     witness_tool: Some(name.to_string()),
                     param_overrides: BTreeMap::from([
                         ("read_file_tool".to_string(), name.to_string()),
-                        ("write_file_tool".to_string(), name.to_string()),
                         ("path_field".to_string(), field),
                     ]),
                     reason: format!("tool `{name}` accepts a path-shaped argument"),
@@ -340,6 +360,17 @@ fn first_matching_field(schema: &rmcp::model::JsonObject, candidates: &[&str]) -
     None
 }
 
+/// A tool whose documented purpose is to return its input (`echo`,
+/// `ping`, `reverse`). Matched on whole name tokens so `echo_logs`
+/// counts but `checkout` does not.
+fn is_reflector(tool: &Tool) -> bool {
+    const REFLECTORS: &[&str] = &["echo", "ping", "reverse", "repeat", "mirror", "parrot"];
+    tool.name
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| REFLECTORS.contains(&token))
+}
+
 /// Returns `true` when `name` contains any of `tokens` (lowercase
 /// substring match). Used for cheap name-based heuristics.
 fn matches_any_token(name: &str, tokens: &[&str]) -> bool {
@@ -489,6 +520,83 @@ mod tests {
             pt.param_overrides.get("read_file_tool").map(|s| s.as_str()),
             Some("read_file")
         );
+    }
+
+    #[test]
+    fn reflection_packs_skip_echo_witness() {
+        let text = json!({"type": "object", "properties": {"message": {"type": "string"}}});
+        let only_echo = suggest_packs(&[tool("echo", text.clone(), None)]);
+        assert!(!only_echo
+            .iter()
+            .any(|p| p.pack == "secrets-leakage" || p.pack == "unicode"));
+        // large-payload has no reflection premise and keeps echo.
+        assert!(only_echo.iter().any(|p| p.pack == "large-payload"));
+
+        let mixed = suggest_packs(&[
+            tool("echo", text.clone(), None),
+            tool("log_message", text, None),
+        ]);
+        let sl = mixed.iter().find(|p| p.pack == "secrets-leakage").unwrap();
+        assert_eq!(sl.witness_tool.as_deref(), Some("log_message"));
+    }
+
+    #[test]
+    fn path_traversal_skips_mutating_tools_and_carries_field() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}},
+        });
+        let tools = vec![
+            tool("create_directory", schema.clone(), None),
+            tool("get_file_info", schema, None),
+        ];
+        let s = suggest_packs(&tools);
+        let pt: Vec<_> = s.iter().filter(|p| p.pack == "path-traversal").collect();
+        assert_eq!(pt.len(), 1);
+        assert_eq!(pt[0].witness_tool.as_deref(), Some("get_file_info"));
+        assert_eq!(
+            pt[0].param_overrides.get("path_field").map(|s| s.as_str()),
+            Some("file_path")
+        );
+        assert!(!pt[0].param_overrides.contains_key("write_file_tool"));
+    }
+
+    /// Contract: every override `suggest` emits must be declared by the
+    /// embedded pack it targets, otherwise `wallfacer property` aborts
+    /// on the generated config (campaign regression on desktop-commander).
+    #[test]
+    fn every_suggestion_resolves_against_its_embedded_pack() {
+        use crate::run::pack::{embedded_pack_source, resolve, EmbeddedLoader};
+        let s = |props: Value| json!({"type": "object", "properties": props});
+        let tools = vec![
+            tool("echo", s(json!({"message": {"type": "string"}})), None),
+            tool("whoami", json!({}), None),
+            tool("read_file", s(json!({"path": {"type": "string"}})), None),
+            tool("query_db", s(json!({"sql": {"type": "string"}})), None),
+            tool("run_shell", s(json!({"cmd": {"type": "string"}})), None),
+            tool("ask", s(json!({"prompt": {"type": "string"}})), None),
+            tool("record_create", json!({}), None),
+            tool("record_read", json!({}), None),
+            tool("record_delete", json!({}), None),
+            tool("auth_login", json!({}), None),
+            tool("auth_logout", json!({}), None),
+            tool_with_annotations("list_users", true),
+        ];
+        let suggestions = suggest_packs(&tools);
+        assert!(
+            suggestions.len() >= 10,
+            "fixture should exercise most heuristics"
+        );
+        for sug in suggestions {
+            let source = embedded_pack_source(&sug.pack)
+                .unwrap_or_else(|| panic!("suggested pack `{}` is not embedded", sug.pack));
+            if let Err(e) = resolve(source, &sug.param_overrides, &EmbeddedLoader) {
+                panic!(
+                    "pack `{}` rejects overrides {:?}: {e}",
+                    sug.pack, sug.param_overrides
+                );
+            }
+        }
     }
 
     #[test]

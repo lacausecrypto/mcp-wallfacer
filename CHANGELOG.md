@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## Unreleased
+
+Fixes found by the first pass of the v0.8 real-world campaign
+(`server-everything`, `context7`, `desktop-commander`,
+`mcp-server-fetch`): most findings were false positives produced by
+wallfacer itself, and one class of real failures was hidden.
+
+### Fixed — `property` and sequences reported crashed servers as passing
+
+The property and sequence runners rewrote a hang, crash or protocol
+error into a synthetic `{"isError": true}` envelope and evaluated the
+invariant against it. Every invariant with an "or the call errored"
+branch (path-traversal, unicode, `expect: error` sequence steps…)
+therefore **passed on a dead server**. The example fixture shows it:
+`divide(_, 0)` exits the process, yet "divide(_, 0) returns isError"
+passed. Transport failures are now reported as their own `crash` /
+`hang` / `protocol_error` finding, naming the invariant in `details`;
+in a sequence they fail the step. Consumers that assumed `property`
+only emits `property_failure` / `sequence_failure` should handle these
+kinds.
+
+### Fixed — `suggest` generated configs that `property` rejected
+
+`suggest` emitted `path_field` for `path-traversal`, a parameter the
+pack did not declare, so `property` aborted before running any pack.
+The pack now declares `path_field` (default `path`) and uses it as the
+probe's argument name. `suggest` also no longer points the pack at
+mutating tools (`create_directory`, `write_*`, …) or sets
+`write_file_tool` to a read tool. A new test resolves every suggestion
+against its embedded pack.
+
+### Fixed — `idempotency` required optional MCP fields
+
+`isError` and `structuredContent` are optional in the MCP spec (absent
+`isError` means `false`). The pack failed every text-only response;
+it now only checks their type when present.
+
+### Fixed — reflection false positives in `secrets-leakage` / `unicode`
+
+Both packs detect the probe string being reflected back. A validation
+error quoting the rejected input (pydantic, zod) is not a leak:
+`secrets-leakage` now passes on `isError: true`, as `unicode` already
+did. `suggest` no longer picks a reflector (`echo`, `ping`, …) as their
+witness, since such a tool fails them by design; when a server only has
+reflectors, the two packs are not suggested.
+
+### Changed
+
+- `examples/python_server`: `list_active_users` now returns a string
+  `isError` (a real violation) instead of a spec-valid envelope.
+
 ## v0.8.1 — 2026-05-01
 
 Patch release fixing four issues found by a self-audit + battle-test

@@ -188,7 +188,7 @@ impl FuzzPlan {
                 let (payload_value, payload_trail): (Value, Vec<String>) = if use_mutation {
                     let pick = &prior_corpus[rng.gen_range(0..prior_corpus.len())];
                     let mutated = corpus_mutator::mutate(&pick.input, &mut rng);
-                    (mutated, vec![format!("mutated from corpus seed")])
+                    (mutated, vec!["mutated from corpus seed".to_string()])
                 } else {
                     match try_generate_payload(&input_schema, &mut rng, self.mode) {
                         Ok(payload) => (payload.value, payload.trail),

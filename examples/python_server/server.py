@@ -133,11 +133,12 @@ TOOLS = [
             "readOnlyHint": True,
         },
     },
-    # idempotency / tool-annotations: idempotentHint=true but envelope
-    # is missing isError + structuredContent.
+    # idempotency / tool-annotations: idempotentHint=true but the
+    # envelope carries `isError` as a string — a real spec violation
+    # (absent isError/structuredContent would be valid).
     {
         "name": "list_active_users",
-        "description": "BUG: idempotentHint=true but malformed envelope.",
+        "description": "BUG: idempotentHint=true but isError is a string.",
         "inputSchema": object_schema({}, []),
         "annotations": {
             "idempotentHint": True,
@@ -281,8 +282,9 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "broken_reader":
         return text_result("read failed", is_error=True)
     if name == "list_active_users":
-        # idempotentHint=true but envelope omits isError + structuredContent.
-        return {"content": [{"type": "text", "text": "alice, bob"}]}
+        # BUG: isError must be a boolean; clients doing `isError === false`
+        # misread the string "false".
+        return {"content": [{"type": "text", "text": "alice, bob"}], "isError": "false"}
     # ---- Phase T — context-poisoning ----
     if name == "poisoned_helper":
         # The bug is in the tool's *description*, not the response,

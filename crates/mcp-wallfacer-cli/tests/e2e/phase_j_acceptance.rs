@@ -2,9 +2,9 @@
 //! pack-grouped findings on the example fixture.
 //!
 //! The Phase plan asked for "≥ 6 finding kinds + no duplications".
-//! `wallfacer property` only produces `PropertyFailure` findings (the
-//! Crash / Hang / SchemaViolation / ProtocolError / StateLeak kinds
-//! are covered by the other commands), so the realistic acceptance is
+//! `wallfacer property` produces `PropertyFailure` / `SequenceFailure`
+//! findings, plus Crash / Hang / ProtocolError when the probe call
+//! itself fails (v0.8.2 — previously masked), so the realistic acceptance is
 //! that `--pack-all` exercises a wide swath of the embedded library
 //! without duplicate invariants. We assert: ≥ 20 findings across ≥ 5
 //! packs, every finding name unique.
@@ -39,6 +39,26 @@ fn run(args: &[&str]) -> Value {
         .unwrap_or_else(|_| panic!("non-JSON stdout from `wallfacer {}`", args.join(" ")))
 }
 
+/// Invariant (or sequence) a finding belongs to. Transport-failure
+/// kinds (crash / hang / protocol_error) carry it in `details` as
+/// ``(invariant `name`)``.
+fn invariant_name(finding: &Value) -> String {
+    let kind = &finding["kind"];
+    if let Some(name) = kind["invariant"]
+        .as_str()
+        .or_else(|| kind["sequence"].as_str())
+    {
+        return name.to_string();
+    }
+    let details = finding["details"].as_str().expect("finding details");
+    let start = details
+        .find("(invariant `")
+        .unwrap_or_else(|| panic!("transport finding without invariant name: {details}"))
+        + "(invariant `".len();
+    let len = details[start..].find('`').expect("closing backtick");
+    details[start..start + len].to_string()
+}
+
 #[test]
 fn pack_all_produces_diverse_findings_without_duplicates() {
     let report = run(&[
@@ -63,12 +83,7 @@ fn pack_all_produces_diverse_findings_without_duplicates() {
     // `kind.sequence` (SequenceFailure, Phase L).
     let mut names: BTreeSet<String> = BTreeSet::new();
     for finding in findings {
-        let kind_obj = &finding["kind"];
-        let inv = kind_obj["invariant"]
-            .as_str()
-            .or_else(|| kind_obj["sequence"].as_str())
-            .expect("finding kind carries invariant or sequence name")
-            .to_string();
+        let inv = invariant_name(finding);
         assert!(
             names.insert(inv.clone()),
             "duplicate finding `{inv}` (Phase J: dedup must drop later occurrences)"
@@ -107,12 +122,7 @@ fn security_meta_pack_loads_seven_packs_without_duplicates() {
     );
     let mut names: BTreeSet<String> = BTreeSet::new();
     for finding in findings {
-        let kind_obj = &finding["kind"];
-        let inv = kind_obj["invariant"]
-            .as_str()
-            .or_else(|| kind_obj["sequence"].as_str())
-            .expect("finding kind carries invariant or sequence name")
-            .to_string();
+        let inv = invariant_name(finding);
         assert!(
             names.insert(inv.clone()),
             "duplicate `{inv}` from security pack"

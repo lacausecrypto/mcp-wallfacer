@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{
     client::CallOutcome,
@@ -259,26 +259,45 @@ impl PropertyPlan {
                 } else {
                     runner::input_for_case(invariant, case_index, &mut rng)
                 };
-                let response = invoke(client, &invariant.tool, input.clone(), self.timeout).await;
-
                 let live_tool = tool_index.get(&invariant.tool).copied();
-                if let Err(error) = runner::evaluate_with_tool(
-                    invariant,
-                    input.clone(),
-                    response.clone(),
-                    live_tool,
-                ) {
+                let failure =
+                    match invoke(client, &invariant.tool, input.clone(), self.timeout).await {
+                        Ok(response) => runner::evaluate_with_tool(
+                            invariant,
+                            input.clone(),
+                            response.clone(),
+                            live_tool,
+                        )
+                        .err()
+                        .map(|error| {
+                            (
+                                FindingKind::PropertyFailure {
+                                    invariant: invariant.name.clone(),
+                                },
+                                "property invariant failed",
+                                format!(
+                                    "{error}\ninput: {}\nresponse: {}",
+                                    serde_json::to_string_pretty(&input).unwrap_or_default(),
+                                    serde_json::to_string_pretty(&response).unwrap_or_default(),
+                                ),
+                            )
+                        }),
+                        Err((kind, message, details)) => Some((
+                            kind,
+                            message,
+                            format!(
+                                "{details} (invariant `{}`)\ninput: {}",
+                                invariant.name,
+                                serde_json::to_string_pretty(&input).unwrap_or_default(),
+                            ),
+                        )),
+                    };
+                if let Some((kind, message, details)) = failure {
                     let mut finding = Finding::new(
-                        FindingKind::PropertyFailure {
-                            invariant: invariant.name.clone(),
-                        },
+                        kind,
                         invariant.tool.clone(),
-                        "property invariant failed",
-                        format!(
-                            "{error}\ninput: {}\nresponse: {}",
-                            serde_json::to_string_pretty(&input).unwrap_or_default(),
-                            serde_json::to_string_pretty(&response).unwrap_or_default(),
-                        ),
+                        message,
+                        details,
                         ReproInfo {
                             seed,
                             tool_call: input,
@@ -306,36 +325,42 @@ impl PropertyPlan {
     }
 }
 
+/// Transport-level failure of a property probe: reported as its own
+/// finding kind, never evaluated against the invariant.
+type ProbeFailure = (FindingKind, &'static str, String);
+
+/// Calls the tool once. A hang, crash or protocol error comes back as
+/// `Err` so the caller reports it as such: rewriting it into an
+/// `isError: true` envelope (pre-v0.8.2 behaviour) made every invariant
+/// with an "or the call errored" branch pass on a crashed server.
 async fn invoke<C: McpExec + ?Sized>(
     client: &mut C,
     tool: &str,
     input: Value,
     timeout: Duration,
-) -> Value {
-    match client.call_tool(tool, input, timeout).await {
-        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
-        CallOutcome::Hang(duration) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-                "isError": true,
-            })
-        }
-        CallOutcome::Crash(reason) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": reason}],
-                "isError": true,
-            })
-        }
-        CallOutcome::ProtocolError(message) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": message}],
-                "isError": true,
-            })
-        }
-    }
+) -> std::result::Result<Value, ProbeFailure> {
+    let failure = match client.call_tool(tool, input, timeout).await {
+        CallOutcome::Ok(result) => return Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+        CallOutcome::Hang(duration) => (
+            FindingKind::Hang {
+                ms: duration.as_millis() as u64,
+            },
+            "tool call timed out",
+            format!("timeout exceeded after {duration:?}"),
+        ),
+        CallOutcome::Crash(reason) => (
+            FindingKind::Crash,
+            "server crashed during tool call",
+            reason,
+        ),
+        CallOutcome::ProtocolError(message) => (
+            FindingKind::ProtocolError,
+            "protocol error during tool call",
+            message,
+        ),
+    };
+    client.reconnect().await.ok();
+    Err(failure)
 }
 
 /// Parses an invariants YAML file into an [`InvariantFile`] for use with
@@ -521,6 +546,61 @@ for_each_tool:
       assert: []
 ";
         dsl::parse(yaml).expect("parse for_each yaml")
+    }
+
+    /// Regression: transport failures used to be rewritten into an
+    /// `isError: true` envelope, so an invariant with an "or the call
+    /// errored" branch passed on a crashed server and reported nothing.
+    #[tokio::test]
+    async fn crash_is_reported_not_evaluated_as_error_envelope() {
+        let mut client = MockClient::new().register(tool("read_file"), |_| {
+            CallOutcome::Crash("process exited".to_string())
+        });
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: traversal_rejected
+    tool: read_file
+    fixed: { path: "../../etc/passwd" }
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(report.findings_count, 1);
+        assert_eq!(client.reconnect_count(), 1);
+        let findings = corpus.list_findings().expect("list");
+        assert!(
+            matches!(findings[0].kind, FindingKind::Crash),
+            "{:?}",
+            findings[0].kind
+        );
     }
 
     #[tokio::test]
