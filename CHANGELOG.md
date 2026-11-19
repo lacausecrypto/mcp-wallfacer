@@ -11,6 +11,50 @@ servers run in a network-less sandbox): most findings were false
 positives produced by wallfacer itself, and one class of real failures
 was hidden.
 
+### Fixed — prompt-injection probes failed on their own echo
+
+The `prompt-injection` and `prompt-injection-v2` failure patterns
+(`system prompt`, `admin mode`, `JAILBROKEN`, `evil.example/exfil`,
+`password_hash`, …) appeared in the probes themselves, so any server that
+quoted its input failed them: a pydantic validation error repeating the
+probe was reported as a system-prompt leak. Every probe now asks the
+model to *build* its marker — the reverse of `DETNARG-NIMDA`, `JAIL` and
+`BROKEN` joined — and the leak patterns are chat-template role markers,
+API-key shapes and the canary, none of which a probe contains. A unit test
+checks every embedded pack: no `not matches_regex` pattern may match the
+probe of its own invariant or sequence step (it caught 17).
+
+### Changed — `auth` is opt-in; bearer-echo check removed
+
+`suggest` no longer proposes the `auth` pack.
+`auth.unauthenticated_requests_are_rejected` encodes an application
+contract (`isError` or `structuredContent.anonymous` on an anonymous
+`whoami`) and assumes the server runs without credentials. In the
+campaign it failed on a server that answered "Not logged in" in plain
+text, and on a `get_user_profile` tool called without its required
+`user_id`. A configured server legitimately returns its user.
+`auth.bearer_tokens_never_echoed` only flagged a server that repeats the
+token the client sent, which leaks nothing. Disclosure of the server's own
+secrets is covered for every server by the canary.
+
+### Fixed — sequence transport failures reported as `sequence_failure`
+
+When a server crashed or hung during a sequence step, the failure was
+filed under the sequence name as a `sequence_failure`, and the dead
+connection failed every later sequence with "transport closed": one
+crash in obsidian-mcp-server came out as three path-traversal failures.
+A transport failure is now a `crash`, `hang` or `protocol_error`
+finding on the tool the step called. A canary disclosure is a
+`secret_leak` finding. The runner reconnects before the next sequence,
+and a server that does not come back is an error, not a silent skip.
+
+### Fixed — side-effecting tools picked as probe witnesses
+
+Tools named with `run`, `exec`, `execute`, `start`, `stop`, `kill`,
+`launch`, `spawn`, `trigger`, `deploy` or `install` are no longer chosen
+as witnesses for the hostile-input packs. `workers_run` had become the
+path-traversal read witness and was sent UNC paths.
+
 ### Fixed — 10 MiB fuzz strings flagged every tool of TypeScript servers
 
 One adversarial string in ten was 10 MiB, exactly the per-message cap of

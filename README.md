@@ -118,12 +118,12 @@ jobs:
 | has any user-facing tool | [`large-payload`](docs/packs/large-payload.md) | graceful handling of 64 KiB / 1 MiB strings and 10k-item arrays |
 | has any user-facing tool | [`error-shape`](docs/packs/error-shape.md) | envelope shape, no stack traces, no internal paths |
 | has any user-facing tool | [`mcp-spec-conformance`](docs/packs/mcp-spec-conformance.md) | wire-format conformance to the MCP spec itself |
-| has authentication (whoami / login) | [`auth`](docs/packs/auth.md) | anonymous rejection, bearer echo, session cookies |
+| has authentication and you run it without credentials (opt-in, never suggested) | [`auth`](docs/packs/auth.md) | anonymous rejection contract, admin-resource filtering, session cookies |
 | has RBAC | [`authorization`](docs/packs/authorization.md) | role filtering, escalation, ACL on resources |
 | bridges to a filesystem | [`path-traversal`](docs/packs/path-traversal.md) | `../`, URL-encoded and UNC escapes from a root the server enforces (servers with full filesystem access by design are reported inconclusive, not vulnerable) |
 | bridges to a database | [`injection-sql`](docs/packs/injection-sql.md) | `'; DROP`, UNION SELECT, comment bypass |
 | spawns processes | [`injection-shell`](docs/packs/injection-shell.md) | `;`, `&&`, backticks, `$(...)` expansion |
-| proxies LLM completions | [`prompt-injection`](docs/packs/prompt-injection.md) | "ignore previous", role override, jailbreak markers |
+| proxies LLM completions | [`prompt-injection`](docs/packs/prompt-injection.md) | "ignore previous", role override, jailbreak — reflection-proof markers |
 | proxies LLM completions (deeper coverage) | `prompt-injection-v2` | 50 variants — jailbreaks, chain-of-thought, multilingual, base64 / rot13 / zero-width |
 | paginates lists | [`pagination`](docs/packs/pagination.md) | limit honoured, cursor stable, no leak across pages |
 | declares `idempotentHint: true` | [`idempotency`](docs/packs/idempotency.md) | envelope stability under repeated calls |

@@ -152,14 +152,23 @@ and any other per-connection state survive across the chain.
 
 - A JSON-RPC error reply (`-32601 method not found`, `-32602`, …) is a
   rejection: the step sees it as an `isError: true` result.
-- A hang, crash or protocol error fails the sequence at that step (a
+- A hang, crash or protocol error ends the sequence at that step (a
   crash is never mistaken for the rejection an `expect: error` step
-  wants).
+  wants). It is reported as a `hang`, `crash` or `protocol_error`
+  finding on the tool the step called — the same kind the fuzz and
+  invariant runners report for that tool — not as a `sequence_failure`.
+  The runner then reconnects before the next sequence: the connection
+  state is lost anyway, and one crash must not fail every later
+  sequence with "transport closed".
 - Any response containing wallfacer's canary secret (see
-  [architecture](./architecture.md#canary-secret)) fails the sequence.
+  [architecture](./architecture.md#canary-secret)) ends the sequence
+  with a `secret_leak` finding on that tool.
+- A failed `expect` or `assert` is a `sequence_failure`, filed under the
+  sequence name with the step index.
 
 The single-tool property runner reconnects after each transport
-failure. Sequences trade aggressive recovery for state continuity.
+failure. Sequences never reconnect mid-chain: they trade recovery for
+state continuity.
 
 ## Pack examples
 

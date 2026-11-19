@@ -13,21 +13,24 @@
 //!
 //! Reconnect semantics — sequences hold per-connection state
 //! (authentication tokens, server-side session ids, in-memory
-//! bookkeeping). The runner therefore does **not** issue a reconnect
-//! when a step's call hangs or returns a protocol error: the sequence
-//! is marked failed and the remaining steps are skipped, but the
-//! caller's `Client` is left untouched so a subsequent sequence can
-//! still observe whatever state the broken step left behind.
+//! bookkeeping). The runner therefore never reconnects *within* a
+//! sequence: a step that hangs, crashes or breaks the protocol ends the
+//! sequence. That state is gone anyway, so the runner reconnects before
+//! the next sequence — otherwise one crash would fail every later
+//! sequence with "transport closed".
 //!
-//! Findings emitted by this module carry
+//! A step whose assertions or expected outcome fail yields a
 //! [`crate::finding::FindingKind::SequenceFailure`] tagged with the
-//! offending step index; the corpus folder uses the sequence name as
-//! the per-finding tool slot so a sequence's findings cluster
-//! together.
+//! offending step index, filed under the sequence name. A transport
+//! failure yields the matching `crash` / `hang` / `protocol_error`
+//! finding and a canary disclosure a `secret_leak`, both filed under the
+//! tool the step called: they are facts about that tool, not about the
+//! sequence's assertions, and must aggregate with the same kind found by
+//! the fuzz and invariant runners.
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
@@ -250,17 +253,43 @@ impl SequencePlan {
                 SequenceOutcome::Fail {
                     step_index,
                     step_call,
+                    fault,
                     detail,
                     last_input,
                 } => {
+                    let (kind, tool, message) = match &fault {
+                        StepFault::Check => (
+                            FindingKind::SequenceFailure {
+                                sequence: sequence.name.clone(),
+                                step_index,
+                                step_call: step_call.clone(),
+                            },
+                            sequence.name.clone(),
+                            format!("sequence `{}` failed at step {step_index}", sequence.name),
+                        ),
+                        StepFault::Transport(kind) => (
+                            kind.clone(),
+                            step_call.clone(),
+                            format!(
+                                "{} at step {step_index} of sequence `{}`",
+                                kind.keyword().replace('_', " "),
+                                sequence.name
+                            ),
+                        ),
+                        StepFault::SecretLeak => (
+                            FindingKind::SecretLeak,
+                            step_call.clone(),
+                            format!(
+                                "response disclosed the server's environment \
+                                 (step {step_index} of sequence `{}`)",
+                                sequence.name
+                            ),
+                        ),
+                    };
                     let mut finding = Finding::new(
-                        FindingKind::SequenceFailure {
-                            sequence: sequence.name.clone(),
-                            step_index,
-                            step_call: step_call.clone(),
-                        },
-                        sequence.name.clone(),
-                        format!("sequence `{}` failed at step {step_index}", sequence.name),
+                        kind,
+                        tool,
+                        message,
                         detail,
                         ReproInfo {
                             seed,
@@ -275,6 +304,15 @@ impl SequencePlan {
                     corpus.write_finding(&finding)?;
                     reporter.on_finding(&finding);
                     report.findings_count += 1;
+                    if matches!(fault, StepFault::Transport(_)) {
+                        client.reconnect().await.with_context(|| {
+                            format!(
+                                "server did not come back after `{step_call}` failed \
+                                 in sequence `{}`",
+                                sequence.name
+                            )
+                        })?;
+                    }
                 }
             }
             reporter.on_iteration_end(&sequence.name, 0);
@@ -297,9 +335,21 @@ enum SequenceOutcome {
     Fail {
         step_index: usize,
         step_call: String,
+        fault: StepFault,
         detail: String,
         last_input: Value,
     },
+}
+
+/// Why a sequence step failed: decides the finding kind.
+enum StepFault {
+    /// The step's expected outcome or assertions did not hold.
+    Check,
+    /// The call hung, crashed or broke the protocol (`crash`, `hang` or
+    /// `protocol_error` kind).
+    Transport(FindingKind),
+    /// The response contained the canary secret.
+    SecretLeak,
 }
 
 /// Executes one [`Sequence`]. Stops at the first failing step and
@@ -370,10 +420,11 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
 
         let response = match invoke(client, &step.call, input.clone(), timeout, rng).await {
             Ok(response) => response,
-            Err(transport) => {
+            Err((kind, transport)) => {
                 return SequenceOutcome::Fail {
                     step_index,
                     step_call: step.call.clone(),
+                    fault: StepFault::Transport(kind),
                     detail: format!(
                         "step {step_index} (`{}`) transport failure: {transport}\ninput: {}",
                         step.call,
@@ -388,6 +439,7 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             return SequenceOutcome::Fail {
                 step_index,
                 step_call: step.call.clone(),
+                fault: StepFault::SecretLeak,
                 detail: format!(
                     "step {step_index} (`{}`): {}\ninput: {}",
                     step.call,
@@ -442,6 +494,7 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             return SequenceOutcome::Fail {
                 step_index,
                 step_call: step.call.clone(),
+                fault: StepFault::Check,
                 detail: format!(
                     "step {step_index} (`{}`) outcome mismatch: {detail}\n\
                      input: {}\nresponse: {}",
@@ -466,6 +519,7 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
                 return SequenceOutcome::Fail {
                     step_index,
                     step_call: step.call.clone(),
+                    fault: StepFault::Check,
                     detail: format!(
                         "step {step_index} (`{}`) assertion failed: {err}\n\
                          input: {}\nresponse: {}",
@@ -554,8 +608,8 @@ fn check_step_outcome(response: &Value, expected: StepOutcome) -> Option<String>
 /// `invoke()` but **does not reconnect** on failure: sequences depend
 /// on per-connection state surviving across steps.
 ///
-/// A hang, crash or protocol error is returned as `Err` and fails the
-/// sequence. It must never be rewritten into an `isError: true`
+/// A hang, crash or protocol error is returned as `Err` — with the
+/// finding kind it maps to — and fails the sequence. It must never be rewritten into an `isError: true`
 /// envelope: a step that `expect: error` would then count a crashed
 /// server as the expected rejection.
 async fn invoke<C: McpExec + ?Sized>(
@@ -564,12 +618,20 @@ async fn invoke<C: McpExec + ?Sized>(
     input: Value,
     timeout: Duration,
     _rng: &mut ChaCha20Rng,
-) -> std::result::Result<Value, String> {
+) -> std::result::Result<Value, (FindingKind, String)> {
     match client.call_tool(tool, input, timeout).await {
         CallOutcome::Ok(result) => Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
-        CallOutcome::Hang(duration) => Err(format!("hang: no response after {duration:?}")),
-        CallOutcome::Crash(reason) => Err(format!("crash: {reason}")),
-        CallOutcome::ProtocolError(message) => Err(format!("protocol error: {message}")),
+        CallOutcome::Hang(duration) => Err((
+            FindingKind::Hang {
+                ms: duration.as_millis() as u64,
+            },
+            format!("hang: no response after {duration:?}"),
+        )),
+        CallOutcome::Crash(reason) => Err((FindingKind::Crash, format!("crash: {reason}"))),
+        CallOutcome::ProtocolError(message) => Err((
+            FindingKind::ProtocolError,
+            format!("protocol error: {message}"),
+        )),
         // A JSON-RPC error reply is a rejection the step can expect.
         CallOutcome::JsonRpcError { code, message } => Ok(
             crate::run::property::json_rpc_error_envelope(code, &message),
@@ -1159,6 +1221,70 @@ steps:
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(report.blocked.len(), 1);
         assert_eq!(report.blocked[0].tool, "delete_record");
+    }
+
+    /// Campaign regression (obsidian-mcp-server): a server that crashed
+    /// on the first path-traversal sequence failed all three as
+    /// `sequence_failure` "transport closed", filed under the pack's
+    /// sequence names. The crash is one `crash` finding on the tool, and
+    /// the next sequence runs on a fresh connection.
+    #[tokio::test]
+    async fn transport_failure_is_a_tool_finding_and_the_next_sequence_reconnects() {
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = crate::run::exec::MockClient::new()
+            .register(tool("list_notes"), |_| {
+                CallOutcome::Crash("Transport closed".to_string())
+            })
+            .register(tool("read_note"), |_| text("hello", false));
+        let parse = |yaml: &str| serde_yaml::from_str::<Sequence>(yaml).unwrap();
+        let plan = SequencePlan {
+            sequences: vec![
+                parse("name: first\nsteps:\n  - call: list_notes\n    expect: ok\n"),
+                parse("name: second\nsteps:\n  - call: read_note\n    expect: ok\n"),
+            ],
+            master_seed: 0,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            severity: SeverityConfig::default(),
+            fuzz_corpus: None,
+            mutate_ratio: 0.0,
+            detector: DestructiveDetector::from_config(
+                &crate::target::DestructiveConfig::default(),
+                &crate::target::AllowDestructiveConfig::default(),
+            )
+            .unwrap(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.passed, vec!["second".to_string()]);
+        assert_eq!(client.reconnect_count(), 1);
+        let findings = corpus.list_findings().unwrap();
+        assert_eq!(findings.len(), 1);
+        assert!(
+            matches!(findings[0].kind, FindingKind::Crash),
+            "{:?}",
+            findings[0].kind
+        );
+        assert_eq!(findings[0].tool, "list_notes");
+        assert!(
+            findings[0].message.contains("sequence `first`"),
+            "{}",
+            findings[0].message
+        );
     }
 
     #[test]

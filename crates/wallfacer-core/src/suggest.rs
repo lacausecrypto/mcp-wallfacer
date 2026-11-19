@@ -135,36 +135,14 @@ pub fn suggest_packs(tools: &[Tool]) -> Vec<PackSuggestion> {
     // ---- Tool-specific heuristics ----------------------------------
     for tool in tools {
         let name = tool.name.as_ref();
-        let lower_name = name.to_lowercase();
         let description_lower = tool.description.as_deref().unwrap_or("").to_lowercase();
 
-        // Auth — whoami / current user probes
-        if matches!(lower_name.as_str(), "whoami")
-            || matches_any_token(
-                name,
-                &[
-                    "currentuser",
-                    "current_user",
-                    "get_user",
-                    "userinfo",
-                    "user_info",
-                    "me",
-                ],
-            )
-        {
-            emit(
-                PackSuggestion {
-                    pack: "auth".to_string(),
-                    witness_tool: Some(name.to_string()),
-                    param_overrides: BTreeMap::from([(
-                        "whoami_tool".to_string(),
-                        name.to_string(),
-                    )]),
-                    reason: format!("tool `{name}` looks like an identity probe"),
-                },
-                &mut out,
-            );
-        }
+        // No `auth` suggestion: its checks encode an application contract
+        // (an unauthenticated `whoami` answers `isError` or
+        // `anonymous: true`) and assume the server runs without
+        // credentials. Neither holds for an arbitrary server — a
+        // configured one legitimately returns its user, an unconfigured
+        // one says "not logged in" in plain text — so the pack is opt-in.
 
         // Path traversal — schema has `path` / `file_path` / `filepath`
         // field. Only non-mutating tools become the read witness: the
@@ -354,9 +332,12 @@ fn pick_witness(tools: &[Tool]) -> Option<StringWitness> {
 
 /// Name words of tools that create, change or delete state. Probes with
 /// hostile input must not be sent to them.
+/// Name words of tools that change state or trigger side effects. Such a
+/// tool is never a witness: the packs send it hostile inputs.
 const MUTATING_WORDS: &[&str] = &[
     "write", "save", "create", "put", "edit", "append", "move", "rename", "mkdir", "delete",
-    "remove", "upload", "set", "update", "insert", "drop", "send", "post", "publish",
+    "remove", "upload", "set", "update", "insert", "drop", "send", "post", "publish", "run",
+    "exec", "execute", "start", "stop", "kill", "launch", "spawn", "trigger", "deploy", "install",
 ];
 
 fn is_mutating(tool: &Tool) -> bool {
@@ -549,16 +530,38 @@ mod tests {
         assert!(!s.iter().any(|p| p.pack == "secrets-leakage"));
     }
 
+    /// Campaign regression: `auth` was auto-applied to `whoami`-like
+    /// tools and failed on servers that answered "not logged in" in
+    /// plain text, or that hold credentials and return their user.
     #[test]
-    fn whoami_tool_triggers_auth_pack() {
-        let tools = vec![tool("whoami", json!({}), None)];
-        let s = suggest_packs(&tools);
-        let auth = s.iter().find(|p| p.pack == "auth").unwrap();
-        assert_eq!(auth.witness_tool.as_deref(), Some("whoami"));
-        assert_eq!(
-            auth.param_overrides.get("whoami_tool").map(|s| s.as_str()),
-            Some("whoami")
-        );
+    fn auth_pack_is_never_auto_suggested() {
+        for name in ["whoami", "getCurrentUser", "get_me", "user_info"] {
+            assert!(
+                !suggest_packs(&[tool(name, json!({}), None)])
+                    .iter()
+                    .any(|p| p.pack == "auth"),
+                "`{name}` must not trigger the auth pack"
+            );
+        }
+    }
+
+    /// Campaign regression: `workers_run` (a `path` field, no write verb)
+    /// became the path-traversal read witness and was sent UNC paths.
+    #[test]
+    fn side_effecting_tools_are_never_witnesses() {
+        let path = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        for name in [
+            "workers_run",
+            "execute_script",
+            "start_server",
+            "kill_process",
+        ] {
+            let s = suggest_packs(&[tool(name, path.clone(), None)]);
+            assert!(
+                s.iter().all(|p| p.witness_tool.as_deref() != Some(name)),
+                "`{name}` must not be a witness: {s:?}"
+            );
+        }
     }
 
     #[test]
@@ -699,8 +702,7 @@ mod tests {
         assert_eq!(name_words("s3Bucket2List"), ["s3", "bucket2", "list"]);
     }
 
-    /// Campaign regression: substring matching made `customerDataProvider`
-    /// and `tools_documentation` look like `whoami` tools (the `me` token),
+    /// Campaign regression: substring matching made
     /// `execute_insights_query` look like a shell tool (`exec`), and
     /// `compute_output` look like a mutating tool (`put`).
     #[test]
@@ -709,18 +711,6 @@ mod tests {
             let tools: Vec<Tool> = tools.iter().map(|n| tool(n, json!({}), None)).collect();
             suggest_packs(&tools)
         };
-        for not_auth in ["customerDataProvider", "tools_documentation", "readme_get"] {
-            assert!(
-                !names(&[not_auth]).iter().any(|p| p.pack == "auth"),
-                "`{not_auth}` must not trigger the auth pack"
-            );
-        }
-        for auth in ["getCurrentUser", "get_me", "me", "user_info"] {
-            assert!(
-                names(&[auth]).iter().any(|p| p.pack == "auth"),
-                "`{auth}` should trigger the auth pack"
-            );
-        }
         assert!(!names(&["execute_insights_query"])
             .iter()
             .any(|p| p.pack == "injection-shell"));

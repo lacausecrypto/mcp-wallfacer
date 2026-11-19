@@ -10,7 +10,6 @@
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `admin_path_pattern` | string | `(?i)/admin(/\|$)` | Regex matching URIs that should never appear in a non-admin user's resource list. |
-| `bearer_witness_tool` | string | `echo` | A read-only tool used as a witness for bearer-echo testing. Pick one that does NOT legitimately echo input back. |
 | `get_user_tool` | string | `get_user` | Tool that fetches a user record by id. |
 | `list_resources_tool` | string | `list_resources` | Tool that lists resources the current user can access. |
 | `whoami_tool` | string | `whoami` | Tool that returns the current user identity. |
@@ -23,13 +22,6 @@
 - **Inputs:** fixed (0 field(s))
 - **Assertion summary:** any_of(2 child)
 - **Test fixtures:** 3 (`pass`, `pass`, `fail`)
-
-### `auth.bearer_tokens_never_echoed`
-
-- **Tool:** `echo`
-- **Inputs:** fixed (1 field(s))
-- **Assertion summary:** not(matches_regex(`$.response.content[0].text`))
-- **Test fixtures:** 2 (`pass`, `fail`)
 
 ### `auth.role_based_listing_filters_admin_resources`
 
@@ -62,6 +54,12 @@ Raw YAML, embedded into the binary at compile time:
 #
 #   [packs.auth]
 #   whoami_tool = "getCurrentUser"
+#
+# Opt-in only (`wallfacer suggest` never proposes it): the checks encode
+# an application contract — an unauthenticated `whoami` answers
+# `isError: true` or `structuredContent.anonymous: true` — and assume the
+# server runs without credentials. Disclosure of the server's own secrets
+# is covered for every server by the canary (see `secrets-leakage`).
 version: 3
 metadata:
   name: auth
@@ -81,10 +79,6 @@ metadata:
       description: "Tool that fetches a user record by id."
       type: string
       default: "get_user"
-    bearer_witness_tool:
-      description: "A read-only tool used as a witness for bearer-echo testing. Pick one that does NOT legitimately echo input back."
-      type: string
-      default: "echo"
     admin_path_pattern:
       description: "Regex matching URIs that should never appear in a non-admin user's resource list."
       type: string
@@ -112,24 +106,6 @@ invariants:
         expect: pass
       - name: "fails when call succeeds without anonymous flag"
         response: { isError: false, structuredContent: { user: "alice" } }
-        expect: fail
-
-  - name: "auth.bearer_tokens_never_echoed"
-    tool: "{{bearer_witness_tool}}"
-    fixed:
-      text: "Authorization: Bearer abc123"
-    assert:
-      - kind: not
-        assertion:
-          kind: matches_regex
-          path: "$.response.content[0].text"
-          pattern: "Bearer\\s+[A-Za-z0-9\\.-_]+"
-    test_fixtures:
-      - name: "passes when bearer not echoed"
-        response: { content: [{ type: "text", text: "ok" }] }
-        expect: pass
-      - name: "fails when bearer is echoed verbatim"
-        response: { content: [{ type: "text", text: "Bearer abc123def456" }] }
         expect: fail
 
   - name: "auth.role_based_listing_filters_admin_resources"
