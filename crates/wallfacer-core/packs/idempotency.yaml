@@ -3,8 +3,8 @@
 # A tool annotated `idempotentHint: true` should produce the same
 # response when called twice with the same input. This pack expands at
 # run-time via `for_each_tool` and runs a single-call probe; the apply
-# template asserts the envelope is well-formed and the response carries
-# a structuredContent field so a downstream client can compare runs.
+# template asserts the envelope is well-formed and, when present,
+# structuredContent is an object a downstream client can compare.
 version: 3
 metadata:
   name: idempotency
@@ -22,22 +22,28 @@ for_each_tool:
     apply:
       fixed: {}
       assert:
+        # `isError` and `structuredContent` are optional in the MCP spec
+        # (absent isError means false). JSON Schema `properties` only
+        # constrains a field when it is present.
         - kind: matches_schema
           path: "$.response"
           schema:
             type: object
             required: [content]
-        # The response must carry an explicit isError field — clients
-        # branching on isError === true cannot tolerate "undefined".
-        - kind: is_type
-          path: "$.response.isError"
-          type: boolean
+            properties:
+              isError: { type: boolean }
       test_fixtures:
         - name: "passes when envelope has isError"
           response: { isError: false, content: [{ type: "text", text: "ok" }] }
           expect: pass
+        - name: "passes when isError is absent (spec default false)"
+          response: { content: [{ type: "text", text: "ok" }] }
+          expect: pass
         - name: "fails when isError is a string"
           response: { isError: "false", content: [{ type: "text", text: "ok" }] }
+          expect: fail
+        - name: "fails when content is missing"
+          response: { isError: false }
           expect: fail
 
   - name: "idempotency.structured_content_is_object.{{tool_name}}"
@@ -47,21 +53,19 @@ for_each_tool:
     apply:
       fixed: {}
       assert:
-        - kind: any_of
-          assert:
-            - kind: equals
-              lhs: { path: "$.response.isError" }
-              rhs: { value: true }
-            - kind: is_type
-              path: "$.response.structuredContent"
-              type: object
+        - kind: matches_schema
+          path: "$.response"
+          schema:
+            type: object
+            properties:
+              structuredContent: { type: object }
       test_fixtures:
         - name: "passes when structuredContent is object"
           response: { isError: false, structuredContent: { ok: true } }
           expect: pass
-        - name: "passes when isError true"
-          response: { isError: true, content: [{ type: "text", text: "fail" }] }
+        - name: "passes when structuredContent is absent (text-only tool)"
+          response: { content: [{ type: "text", text: "ok" }] }
           expect: pass
-        - name: "fails when structuredContent is a string and not error"
+        - name: "fails when structuredContent is a string"
           response: { isError: false, structuredContent: "scalar" }
           expect: fail

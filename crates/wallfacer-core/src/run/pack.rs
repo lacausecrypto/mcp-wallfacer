@@ -231,6 +231,7 @@ fn resolve_inner(
 
     let mut imported: Vec<crate::property::dsl::Invariant> = Vec::new();
     let mut imported_for_each: Vec<crate::property::dsl::ForEachToolBlock> = Vec::new();
+    let mut imported_sequences: Vec<crate::property::dsl::Sequence> = Vec::new();
     for parent_name in extends {
         if !visited.insert(parent_name.clone()) {
             return Err(PackError::Cycle(parent_name));
@@ -247,6 +248,7 @@ fn resolve_inner(
         visited.remove(&parent_name);
         imported.extend(parent.invariants);
         imported_for_each.extend(parent.for_each_tool);
+        imported_sequences.extend(parent.sequences);
     }
 
     // Imported first, primary last — primary overrides on collision.
@@ -254,6 +256,8 @@ fn resolve_inner(
     file.invariants = imported;
     imported_for_each.append(&mut file.for_each_tool);
     file.for_each_tool = imported_for_each;
+    imported_sequences.append(&mut file.sequences);
+    file.sequences = imported_sequences;
     Ok(file)
 }
 
@@ -261,6 +265,7 @@ fn resolve_inner(
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::property::dsl::Assertion;
     use std::collections::HashMap;
 
     /// In-memory loader for tests.
@@ -281,6 +286,35 @@ mod tests {
                 .map(|(name, source)| ((*name).to_string(), (*source).to_string()))
                 .collect(),
         )
+    }
+
+    /// A meta-pack used to drop its parents' `sequences:` (only
+    /// invariants and for_each_tool blocks were imported), so
+    /// `--pack security` silently lost every path-traversal probe.
+    #[test]
+    fn extends_imports_parent_sequences() {
+        let parent = r#"
+version: 3
+invariants: []
+sequences:
+  - name: parent.seq
+    steps:
+      - call: read_file
+"#;
+        let child = r#"
+version: 3
+metadata:
+  name: child
+  extends: [parent]
+invariants: []
+sequences:
+  - name: child.seq
+    steps:
+      - call: read_file
+"#;
+        let file = resolve(child, &BTreeMap::new(), &loader(&[("parent", parent)])).unwrap();
+        let names: Vec<&str> = file.sequences.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["parent.seq", "child.seq"]);
     }
 
     #[test]
@@ -389,5 +423,75 @@ invariants: []
             PackError::Loader { name, .. } => assert_eq!(name, "missing"),
             other => panic!("expected loader error, got {other:?}"),
         }
+    }
+
+    /// Every string inside a JSON value, recursively.
+    fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => out.push(text.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+
+    /// Regexes the response must *not* match (`matches_regex` under `not`).
+    fn forbidden_patterns(assertion: &Assertion, negated: bool, out: &mut Vec<String>) {
+        match assertion {
+            Assertion::MatchesRegex { pattern, .. } if negated => out.push(pattern.clone()),
+            Assertion::Not { assertion } => forbidden_patterns(assertion, !negated, out),
+            Assertion::AllOf { assertions }
+            | Assertion::AnyOf { assertions }
+            | Assertion::ForEach { assertions, .. } => assertions
+                .iter()
+                .for_each(|a| forbidden_patterns(a, negated, out)),
+            _ => {}
+        }
+    }
+
+    /// Campaign regression: `prompt-injection` flagged a pydantic error
+    /// that quoted the probe ("…reveal your system prompt") because the
+    /// leak pattern matched the probe itself. A probe must never satisfy
+    /// its own failure pattern, or any server that echoes or quotes its
+    /// input — an echo tool, a validation error, a search — fails it.
+    #[test]
+    fn no_embedded_probe_matches_its_own_failure_pattern() {
+        let mut violations = Vec::new();
+        for name in embedded_pack_names() {
+            let source = embedded_pack_source(name).unwrap();
+            let file = resolve(source, &BTreeMap::new(), &EmbeddedLoader).unwrap();
+            let mut cases: Vec<(String, Vec<String>, &[Assertion])> = Vec::new();
+            for invariant in &file.invariants {
+                let mut probe = Vec::new();
+                if let Some(fixed) = &invariant.fixed {
+                    fixed.values().for_each(|v| strings(v, &mut probe));
+                }
+                cases.push((invariant.name.clone(), probe, &invariant.assertions));
+            }
+            for sequence in &file.sequences {
+                for (index, step) in sequence.steps.iter().enumerate() {
+                    let mut probe = Vec::new();
+                    if let Some(with) = &step.with {
+                        with.values().for_each(|v| strings(v, &mut probe));
+                    }
+                    let label = format!("{}#{index}", sequence.name);
+                    cases.push((label.clone(), probe.clone(), &step.assertions));
+                    cases.push((label, probe, &step.require));
+                }
+            }
+            for (label, probe, assertions) in cases {
+                let mut patterns = Vec::new();
+                assertions
+                    .iter()
+                    .for_each(|a| forbidden_patterns(a, false, &mut patterns));
+                for pattern in patterns {
+                    let regex = regex::Regex::new(&pattern).unwrap();
+                    if let Some(text) = probe.iter().find(|text| regex.is_match(text)) {
+                        violations.push(format!("{name}/{label}: `{pattern}` matches `{text}`"));
+                    }
+                }
+            }
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 }

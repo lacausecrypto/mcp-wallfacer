@@ -75,7 +75,14 @@ TOOLS = [
     # FindingKind::ProtocolError — server emits non-JSON before its response.
     {
         "name": "bad_protocol",
-        "description": "BUG: writes a non-JSON-RPC line to stdout.",
+        "description": "BUG: answers with a result that is not a valid CallToolResult.",
+        "inputSchema": object_schema({}, []),
+    },
+    # FindingKind::InternalError — the tool raises, the server turns it
+    # into a JSON-RPC error reply (-32603).
+    {
+        "name": "throws_internally",
+        "description": "BUG: raises on every call instead of returning isError.",
         "inputSchema": object_schema({}, []),
     },
     # FindingKind::StateLeak — session_get reads global session state seeded
@@ -100,11 +107,17 @@ TOOLS = [
         "description": "BUG: echoes input verbatim including secrets and escape sequences.",
         "inputSchema": object_schema({"text": {"type": "string"}}),
     },
-    # path-traversal: leaks /etc/passwd content for `..` paths.
+    # path-traversal: refuses absolute paths, but `..` escapes the root.
     {
         "name": "read_file",
-        "description": "BUG: vulnerable to path traversal; leaks /etc/passwd on `..` paths.",
+        "description": "BUG: refuses absolute paths but not `../`; leaks /etc/passwd.",
         "inputSchema": object_schema({"path": {"type": "string"}}),
+    },
+    # secret_leak: a debug tool that dumps the process environment.
+    {
+        "name": "show_config",
+        "description": "BUG: returns the process environment, secrets included.",
+        "inputSchema": object_schema({}),
     },
     # injection-sql: confirms DROP TABLE for SQLi payloads.
     {
@@ -133,11 +146,12 @@ TOOLS = [
             "readOnlyHint": True,
         },
     },
-    # idempotency / tool-annotations: idempotentHint=true but envelope
-    # is missing isError + structuredContent.
+    # idempotency / tool-annotations: idempotentHint=true but the
+    # envelope carries `isError` as a string — a real spec violation
+    # (absent isError/structuredContent would be valid).
     {
         "name": "list_active_users",
-        "description": "BUG: idempotentHint=true but malformed envelope.",
+        "description": "BUG: idempotentHint=true but isError is a string.",
         "inputSchema": object_schema({}, []),
         "annotations": {
             "idempotentHint": True,
@@ -231,10 +245,14 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         count = limit + 1 if PAGINATE_TOGGLE % 2 else limit
         return structured_result({"items": list(range(count))})
     if name == "bad_protocol":
-        # Raises so the framework's catch-all writes a JSON-RPC error
-        # envelope; rmcp surfaces that as `CallOutcome::ProtocolError` and
-        # wallfacer records a `FindingKind::ProtocolError`.
-        raise RuntimeError("malformed by design")
+        # A well-formed JSON-RPC reply whose `result` breaks the
+        # CallToolResult shape (`content` must be an array): the client
+        # can't decode it, wallfacer records a `FindingKind::ProtocolError`.
+        return {"content": "malformed by design"}
+    if name == "throws_internally":
+        # The catch-all turns this into a JSON-RPC error reply; wallfacer
+        # records a low-severity `FindingKind::InternalError`.
+        raise RuntimeError("unhandled by design")
     if name == "session_set":
         SESSIONS[str(args["key"])] = args.get("value")
         return structured_result({"ok": True})
@@ -245,11 +263,22 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return text_result(str(args.get("text", "")))
     if name == "read_file":
         path = str(args.get("path", ""))
-        if "etc" in path or "passwd" in path or path.startswith("/"):
+        # Confined in appearance: absolute and UNC paths are refused...
+        if path.startswith("/") or path.startswith("\\"):
+            return text_result(
+                "access denied: path is outside the workspace", is_error=True
+            )
+        # ...but BUG: relative paths are joined to the workspace without
+        # normalisation, so `../` (plain or percent-encoded) escapes it.
+        if ".." in path:
             return text_result(
                 "root:x:0:0:root:/root:/bin/bash\nnobody:x:1:1::/:/bin/sh"
             )
         return text_result("file content")
+    if name == "show_config":
+        return text_result(
+            "\n".join(f"{key}={value}" for key, value in sorted(os.environ.items()))
+        )
     if name == "query_db":
         query = str(args.get("query", "")).lower()
         if "drop table" in query:
@@ -281,8 +310,9 @@ async def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "broken_reader":
         return text_result("read failed", is_error=True)
     if name == "list_active_users":
-        # idempotentHint=true but envelope omits isError + structuredContent.
-        return {"content": [{"type": "text", "text": "alice, bob"}]}
+        # BUG: isError must be a boolean; clients doing `isError === false`
+        # misread the string "false".
+        return {"content": [{"type": "text", "text": "alice, bob"}], "isError": "false"}
     # ---- Phase T — context-poisoning ----
     if name == "poisoned_helper":
         # The bug is in the tool's *description*, not the response,

@@ -13,21 +13,24 @@
 //!
 //! Reconnect semantics — sequences hold per-connection state
 //! (authentication tokens, server-side session ids, in-memory
-//! bookkeeping). The runner therefore does **not** issue a reconnect
-//! when a step's call hangs or returns a protocol error: the sequence
-//! is marked failed and the remaining steps are skipped, but the
-//! caller's `Client` is left untouched so a subsequent sequence can
-//! still observe whatever state the broken step left behind.
+//! bookkeeping). The runner therefore never reconnects *within* a
+//! sequence: a step that hangs, crashes or breaks the protocol ends the
+//! sequence. That state is gone anyway, so the runner reconnects before
+//! the next sequence — otherwise one crash would fail every later
+//! sequence with "transport closed".
 //!
-//! Findings emitted by this module carry
+//! A step whose assertions or expected outcome fail yields a
 //! [`crate::finding::FindingKind::SequenceFailure`] tagged with the
-//! offending step index; the corpus folder uses the sequence name as
-//! the per-finding tool slot so a sequence's findings cluster
-//! together.
+//! offending step index, filed under the sequence name. A transport
+//! failure yields the matching `crash` / `hang` / `protocol_error`
+//! finding and a canary disclosure a `secret_leak`, both filed under the
+//! tool the step called: they are facts about that tool, not about the
+//! sequence's assertions, and must aggregate with the same kind found by
+//! the fuzz and invariant runners.
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
@@ -40,14 +43,14 @@ use crate::{
     fuzz_corpus::{response_fingerprint, CorpusTrigger, FuzzCorpus, FuzzCorpusEntry},
     mutate::corpus_mutator,
     property::{
-        dsl::{FixtureExpect, Sequence, SequenceFixture, StepOutcome},
+        dsl::{FixtureExpect, Sequence, SequenceFixture, SequenceStep, StepOutcome},
         jsonpath, runner,
     },
     seed::{derive_seed, derive_seed_canonical},
     target::SeverityConfig,
 };
 
-use super::{exec::McpExec, reporter::Reporter};
+use super::{destructive::DestructiveDetector, exec::McpExec, reporter::Reporter};
 
 /// Outcome of a single sequence run.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -61,6 +64,29 @@ pub struct SequenceReport {
     /// partially execute a sequence — pre-flight check fails the
     /// whole thing — so the operator sees a single skip per sequence.
     pub skipped_missing_tool: Vec<SkippedSequence>,
+    /// Sequences that could not run to a verdict because a precondition
+    /// step failed (see [`crate::property::dsl::SequenceStep::expect`]).
+    pub inconclusive: Vec<InconclusiveSequence>,
+    /// Sequences not run because a step calls a tool the destructive
+    /// guard blocks (not in `[allow_destructive]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<BlockedSequence>,
+}
+
+/// One sequence skipped by the destructive-tool guard.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockedSequence {
+    pub sequence: String,
+    /// First blocked tool among the sequence's steps.
+    pub tool: String,
+}
+
+/// One sequence whose setup did not succeed.
+#[derive(Debug, Clone, Serialize)]
+pub struct InconclusiveSequence {
+    pub sequence: String,
+    pub step_index: usize,
+    pub reason: String,
 }
 
 /// One sequence skipped because of a missing tool.
@@ -100,6 +126,10 @@ pub struct SequencePlan {
     /// Ignored when [`Self::fuzz_corpus`] is `None` or the per-tool
     /// corpus is empty.
     pub mutate_ratio: f64,
+    /// Destructive-tool guard, applied to every step like the property
+    /// runner applies it to invariants: a sequence touching a blocked
+    /// tool is skipped whole, never half-run.
+    pub detector: DestructiveDetector,
 }
 
 impl SequencePlan {
@@ -121,8 +151,10 @@ impl SequencePlan {
         reporter: &mut dyn Reporter,
     ) -> Result<SequenceReport> {
         let live_tools = client.list_tools().await?;
-        let tool_names: std::collections::BTreeSet<String> =
-            live_tools.iter().map(|t| t.name.to_string()).collect();
+        let tool_index: std::collections::BTreeMap<String, &rmcp::model::Tool> = live_tools
+            .iter()
+            .map(|tool| (tool.name.to_string(), tool))
+            .collect();
 
         let mut report = SequenceReport::default();
 
@@ -156,7 +188,7 @@ impl SequencePlan {
             if let Some(missing) = sequence
                 .steps
                 .iter()
-                .find(|s| !tool_names.contains(&s.call))
+                .find(|s| !tool_index.contains_key(&s.call))
                 .map(|s| s.call.clone())
             {
                 reporter.on_skipped(
@@ -166,6 +198,24 @@ impl SequencePlan {
                 report.skipped_missing_tool.push(SkippedSequence {
                     sequence: sequence.name.clone(),
                     missing_tool: missing,
+                });
+                continue;
+            }
+            if let Some(blocked) = sequence.steps.iter().find_map(|step| {
+                tool_index
+                    .get(&step.call)
+                    .filter(|tool| !self.detector.classify(tool).is_runnable())
+                    .map(|_| step.call.clone())
+            }) {
+                reporter.on_skipped(
+                    &sequence.name,
+                    &format!(
+                        "step calls `{blocked}`, a destructive tool not in [allow_destructive]"
+                    ),
+                );
+                report.blocked.push(BlockedSequence {
+                    sequence: sequence.name.clone(),
+                    tool: blocked,
                 });
                 continue;
             }
@@ -189,20 +239,57 @@ impl SequencePlan {
                 SequenceOutcome::Pass => {
                     report.passed.push(sequence.name.clone());
                 }
+                SequenceOutcome::Inconclusive { step_index, reason } => {
+                    reporter.on_skipped(
+                        &sequence.name,
+                        &format!("inconclusive: precondition step {step_index} failed ({reason})"),
+                    );
+                    report.inconclusive.push(InconclusiveSequence {
+                        sequence: sequence.name.clone(),
+                        step_index,
+                        reason,
+                    });
+                }
                 SequenceOutcome::Fail {
                     step_index,
                     step_call,
+                    fault,
                     detail,
                     last_input,
                 } => {
+                    let (kind, tool, message) = match &fault {
+                        StepFault::Check => (
+                            FindingKind::SequenceFailure {
+                                sequence: sequence.name.clone(),
+                                step_index,
+                                step_call: step_call.clone(),
+                            },
+                            sequence.name.clone(),
+                            format!("sequence `{}` failed at step {step_index}", sequence.name),
+                        ),
+                        StepFault::Transport(kind) => (
+                            kind.clone(),
+                            step_call.clone(),
+                            format!(
+                                "{} at step {step_index} of sequence `{}`",
+                                kind.keyword().replace('_', " "),
+                                sequence.name
+                            ),
+                        ),
+                        StepFault::SecretLeak => (
+                            FindingKind::SecretLeak,
+                            step_call.clone(),
+                            format!(
+                                "response disclosed the server's environment \
+                                 (step {step_index} of sequence `{}`)",
+                                sequence.name
+                            ),
+                        ),
+                    };
                     let mut finding = Finding::new(
-                        FindingKind::SequenceFailure {
-                            sequence: sequence.name.clone(),
-                            step_index,
-                            step_call: step_call.clone(),
-                        },
-                        sequence.name.clone(),
-                        format!("sequence `{}` failed at step {step_index}", sequence.name),
+                        kind,
+                        tool,
+                        message,
                         detail,
                         ReproInfo {
                             seed,
@@ -217,6 +304,15 @@ impl SequencePlan {
                     corpus.write_finding(&finding)?;
                     reporter.on_finding(&finding);
                     report.findings_count += 1;
+                    if matches!(fault, StepFault::Transport(_)) {
+                        client.reconnect().await.with_context(|| {
+                            format!(
+                                "server did not come back after `{step_call}` failed \
+                                 in sequence `{}`",
+                                sequence.name
+                            )
+                        })?;
+                    }
                 }
             }
             reporter.on_iteration_end(&sequence.name, 0);
@@ -229,12 +325,31 @@ impl SequencePlan {
 /// Internal result of running a single sequence.
 enum SequenceOutcome {
     Pass,
+    /// A precondition step (no explicit `expect`) returned an error, or a
+    /// later step referenced a value that setup step never produced. The
+    /// sequence didn't get to test anything: reported as skipped.
+    Inconclusive {
+        step_index: usize,
+        reason: String,
+    },
     Fail {
         step_index: usize,
         step_call: String,
+        fault: StepFault,
         detail: String,
         last_input: Value,
     },
+}
+
+/// Why a sequence step failed: decides the finding kind.
+enum StepFault {
+    /// The step's expected outcome or assertions did not hold.
+    Check,
+    /// The call hung, crashed or broke the protocol (`crash`, `hang` or
+    /// `protocol_error` kind).
+    Transport(FindingKind),
+    /// The response contained the canary secret.
+    SecretLeak,
 }
 
 /// Executes one [`Sequence`]. Stops at the first failing step and
@@ -268,15 +383,13 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             .unwrap_or(Value::Object(Map::new()));
         let substituted = match context.substitute(&raw_input) {
             Ok(value) => value,
+            // An earlier step succeeded but didn't return the value this
+            // step needs (e.g. no `structuredContent.id`): the sequence
+            // can't proceed, which says nothing about the server's state.
             Err(err) => {
-                return SequenceOutcome::Fail {
+                return SequenceOutcome::Inconclusive {
                     step_index,
-                    step_call: step.call.clone(),
-                    detail: format!(
-                        "could not substitute step references in `with:` of step \
-                         {step_index}: {err}"
-                    ),
-                    last_input: raw_input,
+                    reason: format!("step references did not resolve: {err}"),
                 };
             }
         };
@@ -290,7 +403,10 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
         let prior: Vec<FuzzCorpusEntry> = corpus
             .map(|c| c.list(&step.call).unwrap_or_default())
             .unwrap_or_default();
-        let input = if !prior.is_empty() && rng.gen_bool(mutate_ratio.clamp(0.0, 1.0)) {
+        // A `require` step establishes what the rest of the sequence
+        // relies on: it always runs as written, never mutated.
+        let mutable = step.require.is_empty();
+        let input = if mutable && !prior.is_empty() && rng.gen_bool(mutate_ratio.clamp(0.0, 1.0)) {
             // Pick a random corpus entry, mutate it. The seed
             // input is whatever the past run found interesting;
             // current substituted input is ignored on this path
@@ -302,7 +418,37 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             substituted.clone()
         };
 
-        let response = invoke(client, &step.call, input.clone(), timeout, rng).await;
+        let response = match invoke(client, &step.call, input.clone(), timeout, rng).await {
+            Ok(response) => response,
+            Err((kind, transport)) => {
+                return SequenceOutcome::Fail {
+                    step_index,
+                    step_call: step.call.clone(),
+                    fault: StepFault::Transport(kind),
+                    detail: format!(
+                        "step {step_index} (`{}`) transport failure: {transport}\ninput: {}",
+                        step.call,
+                        serde_json::to_string_pretty(&input).unwrap_or_default(),
+                    ),
+                    last_input: input,
+                };
+            }
+        };
+
+        if crate::canary::leaked_in(&response.to_string()) {
+            return SequenceOutcome::Fail {
+                step_index,
+                step_call: step.call.clone(),
+                fault: StepFault::SecretLeak,
+                detail: format!(
+                    "step {step_index} (`{}`): {}\ninput: {}",
+                    step.call,
+                    super::fuzz::canary_leak_details(&response),
+                    serde_json::to_string_pretty(&input).unwrap_or_default(),
+                ),
+                last_input: input,
+            };
+        }
 
         // Phase V — fingerprint the response BEFORE we destructure
         // it for outcome / assertion checks below. Save the input
@@ -336,17 +482,19 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
             });
         };
 
-        // Outcome class check (Ok / Error). Only matters when `expect`
-        // is set: with the default the runner falls through to the
-        // assertion list.
-        let expected = step.expect.unwrap_or_default();
-        if let Some(detail) = check_step_outcome(&response, expected) {
+        if let Some(reason) = unmet_precondition(step, &input, &response) {
+            return SequenceOutcome::Inconclusive { step_index, reason };
+        }
+        if let Some(detail) =
+            expected_outcome(step).and_then(|expected| check_step_outcome(&response, expected))
+        {
             if let Some(c) = corpus {
                 save_finding(c, &fingerprint, &input);
             }
             return SequenceOutcome::Fail {
                 step_index,
                 step_call: step.call.clone(),
+                fault: StepFault::Check,
                 detail: format!(
                     "step {step_index} (`{}`) outcome mismatch: {detail}\n\
                      input: {}\nresponse: {}",
@@ -371,6 +519,7 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
                 return SequenceOutcome::Fail {
                     step_index,
                     step_call: step.call.clone(),
+                    fault: StepFault::Check,
                     detail: format!(
                         "step {step_index} (`{}`) assertion failed: {err}\n\
                          input: {}\nresponse: {}",
@@ -398,6 +547,35 @@ async fn run_one_sequence<C: McpExec + ?Sized>(
     }
 
     SequenceOutcome::Pass
+}
+
+/// A setup step declares nothing to check (no `expect`, `require` or
+/// `assert`): it only has to succeed for later steps to mean anything.
+fn is_setup_step(step: &SequenceStep) -> bool {
+    step.expect.is_none() && step.require.is_empty() && step.assertions.is_empty()
+}
+
+/// Returns why the step's precondition does not hold, if it doesn't:
+/// its explicit `require` list, or, for a setup step, not returning
+/// `isError` (the setup didn't happen).
+fn unmet_precondition(step: &SequenceStep, input: &Value, response: &Value) -> Option<String> {
+    if !step.require.is_empty() {
+        return runner::evaluate_step_assertions(&step.require, input.clone(), response.clone())
+            .err()
+            .map(|err| format!("`{}` precondition not met: {err}", step.call));
+    }
+    if is_setup_step(step) && check_step_outcome(response, StepOutcome::Ok).is_some() {
+        return Some(format!("`{}` returned isError", step.call));
+    }
+    None
+}
+
+/// Outcome class the step must match: only an explicit `expect`.
+/// Otherwise the step's assertions (or its precondition) decide, so a
+/// check like "the traversal is refused or leaks nothing" can pass on
+/// an `isError` reply.
+fn expected_outcome(step: &SequenceStep) -> Option<StepOutcome> {
+    step.expect
 }
 
 /// Verifies the step's response matches the declared
@@ -429,27 +607,35 @@ fn check_step_outcome(response: &Value, expected: StepOutcome) -> Option<String>
 /// Per-call invoke wrapper. Mirrors the property runner's
 /// `invoke()` but **does not reconnect** on failure: sequences depend
 /// on per-connection state surviving across steps.
+///
+/// A hang, crash or protocol error is returned as `Err` — with the
+/// finding kind it maps to — and fails the sequence. It must never be rewritten into an `isError: true`
+/// envelope: a step that `expect: error` would then count a crashed
+/// server as the expected rejection.
 async fn invoke<C: McpExec + ?Sized>(
     client: &mut C,
     tool: &str,
     input: Value,
     timeout: Duration,
     _rng: &mut ChaCha20Rng,
-) -> Value {
+) -> std::result::Result<Value, (FindingKind, String)> {
     match client.call_tool(tool, input, timeout).await {
-        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
-        CallOutcome::Hang(duration) => json!({
-            "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-            "isError": true,
-        }),
-        CallOutcome::Crash(reason) => json!({
-            "content": [{"type": "text", "text": reason}],
-            "isError": true,
-        }),
-        CallOutcome::ProtocolError(message) => json!({
-            "content": [{"type": "text", "text": message}],
-            "isError": true,
-        }),
+        CallOutcome::Ok(result) => Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+        CallOutcome::Hang(duration) => Err((
+            FindingKind::Hang {
+                ms: duration.as_millis() as u64,
+            },
+            format!("hang: no response after {duration:?}"),
+        )),
+        CallOutcome::Crash(reason) => Err((FindingKind::Crash, format!("crash: {reason}"))),
+        CallOutcome::ProtocolError(message) => Err((
+            FindingKind::ProtocolError,
+            format!("protocol error: {message}"),
+        )),
+        // A JSON-RPC error reply is a rejection the step can expect.
+        CallOutcome::JsonRpcError { code, message } => Ok(
+            crate::run::property::json_rpc_error_envelope(code, &message),
+        ),
     }
 }
 
@@ -605,6 +791,7 @@ pub fn evaluate_sequence_fixture(
 
     let mut context = SequenceContext::new();
     let mut sequence_failed_at: Option<(usize, String)> = None;
+    let mut inconclusive_at: Option<(usize, String)> = None;
 
     for (step_index, step) in sequence.steps.iter().enumerate() {
         let raw_input = step
@@ -624,8 +811,13 @@ pub fn evaluate_sequence_fixture(
         };
         let response = fixture.responses[step_index].clone();
 
-        let expected = step.expect.unwrap_or_default();
-        if let Some(detail) = check_step_outcome(&response, expected) {
+        if let Some(reason) = unmet_precondition(step, &input, &response) {
+            inconclusive_at = Some((step_index, reason));
+            break;
+        }
+        if let Some(detail) =
+            expected_outcome(step).and_then(|expected| check_step_outcome(&response, expected))
+        {
             sequence_failed_at = Some((step_index, format!("outcome mismatch: {detail}")));
             break;
         }
@@ -650,7 +842,9 @@ pub fn evaluate_sequence_fixture(
         }
     }
 
-    let observed = if sequence_failed_at.is_some() {
+    let observed = if inconclusive_at.is_some() {
+        FixtureExpect::Inconclusive
+    } else if sequence_failed_at.is_some() {
         FixtureExpect::Fail
     } else {
         FixtureExpect::Pass
@@ -661,6 +855,9 @@ pub fn evaluate_sequence_fixture(
     } else {
         let detail = sequence_failed_at
             .map(|(idx, msg)| format!("step {idx}: {msg}"))
+            .or_else(|| {
+                inconclusive_at.map(|(idx, reason)| format!("step {idx} inconclusive: {reason}"))
+            })
             .unwrap_or_else(|| "all steps passed".to_string());
         SequenceFixtureOutcome::Mismatch {
             expected: fixture.expect,
@@ -688,6 +885,407 @@ fn single_placeholder(raw: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Regression: a crashed server used to be rewritten into an
+    /// `isError: true` envelope, which satisfied `expect: error` and
+    /// let the sequence pass.
+    #[tokio::test]
+    async fn crash_on_expect_error_step_fails_the_sequence() {
+        use crate::client::CallOutcome;
+        use crate::run::exec::MockClient;
+        use rand::SeedableRng;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = MockClient::new()
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| {
+                CallOutcome::Crash("process exited".to_string())
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: deleted_record_is_gone\nsteps:\n  - call: record_delete\n  - call: record_read\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        let outcome = run_one_sequence(
+            &mut client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await;
+        match outcome {
+            SequenceOutcome::Fail {
+                step_index, detail, ..
+            } => {
+                assert_eq!(step_index, 1);
+                assert!(detail.contains("crash: process exited"), "{detail}");
+            }
+            SequenceOutcome::Pass | SequenceOutcome::Inconclusive { .. } => {
+                panic!("crashed step must fail the sequence")
+            }
+        }
+    }
+
+    /// A JSON-RPC error reply satisfies `expect: error`: reading a
+    /// deleted record and getting "not found" is the correct behaviour.
+    #[tokio::test]
+    async fn json_rpc_error_satisfies_expect_error() {
+        use crate::client::CallOutcome;
+        use crate::run::exec::MockClient;
+        use rand::SeedableRng;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = MockClient::new()
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| CallOutcome::JsonRpcError {
+                code: -32602,
+                message: "record not found".to_string(),
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: deleted_record_is_gone\nsteps:\n  - call: record_delete\n  - call: record_read\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        let outcome = run_one_sequence(
+            &mut client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await;
+        assert!(matches!(outcome, SequenceOutcome::Pass));
+    }
+
+    fn crud_client(
+        create: fn(&Value) -> crate::client::CallOutcome,
+    ) -> crate::run::exec::MockClient {
+        use crate::client::CallOutcome;
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        crate::run::exec::MockClient::new()
+            .register(tool("record_create"), create)
+            .register(tool("record_delete"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+            .register(tool("record_read"), |_| {
+                CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
+            })
+    }
+
+    async fn run_crud(client: &mut crate::run::exec::MockClient) -> SequenceOutcome {
+        use rand::SeedableRng;
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: s\nsteps:\n  - call: record_create\n    bind: created\n  - call: record_delete\n    with: { id: \"{{steps.created.response.structuredContent.id}}\" }\n  - call: record_read\n    with: { id: \"{{steps.created.response.structuredContent.id}}\" }\n    expect: error\n",
+        )
+        .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        run_one_sequence(
+            client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await
+    }
+
+    /// Campaign regression: when the setup `create` rejected the probe's
+    /// generic arguments, the sequence was reported as a state leak.
+    #[tokio::test]
+    async fn failed_precondition_step_is_inconclusive() {
+        use crate::client::CallOutcome;
+        let mut client =
+            crud_client(|_| CallOutcome::Ok(rmcp::model::CallToolResult::error(vec![])));
+        match run_crud(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, .. } => assert_eq!(step_index, 0),
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
+        }
+    }
+
+    /// Setup succeeded but returned no `structuredContent.id`: the next
+    /// step can't be built, which is not a state leak either.
+    #[tokio::test]
+    async fn unresolved_step_reference_is_inconclusive() {
+        use crate::client::CallOutcome;
+        let mut client =
+            crud_client(|_| CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![])));
+        match run_crud(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, .. } => assert_eq!(step_index, 1),
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
+        }
+    }
+
+    fn path_client(
+        absolute: fn(&Value) -> crate::client::CallOutcome,
+        dotdot: fn(&Value) -> crate::client::CallOutcome,
+    ) -> crate::run::exec::MockClient {
+        let tool = rmcp::model::Tool::new(
+            "read_file".to_string(),
+            String::new(),
+            std::sync::Arc::new(serde_json::Map::new()),
+        );
+        crate::run::exec::MockClient::new().register(tool, move |args| {
+            if args["path"] == "/etc/passwd" {
+                absolute(args)
+            } else {
+                dotdot(args)
+            }
+        })
+    }
+
+    fn text(body: &str, is_error: bool) -> crate::client::CallOutcome {
+        let content = vec![rmcp::model::ContentBlock::text(body.to_string())];
+        crate::client::CallOutcome::Ok(if is_error {
+            rmcp::model::CallToolResult::error(content)
+        } else {
+            rmcp::model::CallToolResult::success(content)
+        })
+    }
+
+    const PATH_SEQUENCE: &str = r#"
+name: dotdot_blocked
+steps:
+  - call: read_file
+    with: { path: "/etc/passwd" }
+    require:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: "^root:" }
+  - call: read_file
+    with: { path: "../../etc/passwd" }
+    assert:
+      - kind: any_of
+        assert:
+          - kind: equals
+            lhs: { path: "$.response.isError" }
+            rhs: { value: true }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: "^root:" }
+"#;
+
+    async fn run_path(client: &mut crate::run::exec::MockClient) -> SequenceOutcome {
+        use rand::SeedableRng;
+        let sequence: Sequence = serde_yaml::from_str(PATH_SEQUENCE).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut seen = std::collections::BTreeSet::new();
+        run_one_sequence(
+            client,
+            &sequence,
+            &mut rng,
+            Duration::from_secs(1),
+            None,
+            0.0,
+            &mut seen,
+        )
+        .await
+    }
+
+    /// Campaign regression: a server with full filesystem access by
+    /// design was reported for path traversal. With no root to escape,
+    /// the probe proves nothing.
+    #[tokio::test]
+    async fn unmet_require_makes_the_sequence_inconclusive() {
+        let mut client = path_client(
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+        );
+        match run_path(&mut client).await {
+            SequenceOutcome::Inconclusive { step_index, reason } => {
+                assert_eq!(step_index, 0);
+                assert!(reason.contains("precondition not met"), "{reason}");
+            }
+            SequenceOutcome::Pass => panic!("expected inconclusive, got pass"),
+            SequenceOutcome::Fail { detail, .. } => {
+                panic!("expected inconclusive, got fail: {detail}")
+            }
+        }
+    }
+
+    /// A `require` met by a rejection lets the sequence go on, and an
+    /// asserting step passes on `isError` when its assertions allow it.
+    #[tokio::test]
+    async fn rejection_can_satisfy_require_and_assertions() {
+        let mut client = path_client(
+            |_| text("outside allowed directories", true),
+            |_| text("outside allowed directories", true),
+        );
+        assert!(matches!(run_path(&mut client).await, SequenceOutcome::Pass));
+    }
+
+    #[tokio::test]
+    async fn escape_from_a_confined_root_fails() {
+        let mut client = path_client(
+            |_| text("outside allowed directories", true),
+            |_| text("root:x:0:0:root:/root:/bin/ash", false),
+        );
+        match run_path(&mut client).await {
+            SequenceOutcome::Fail { step_index, .. } => assert_eq!(step_index, 1),
+            SequenceOutcome::Pass => panic!("expected fail, got pass"),
+            SequenceOutcome::Inconclusive { reason, .. } => {
+                panic!("expected fail, got inconclusive: {reason}")
+            }
+        }
+    }
+
+    /// Sequences used to bypass the destructive guard the property runner
+    /// applies to invariants.
+    #[tokio::test]
+    async fn sequence_touching_a_destructive_tool_is_blocked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let (a, b) = (calls.clone(), calls.clone());
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = crate::run::exec::MockClient::new()
+            .register(tool("record_create"), move |_| {
+                a.fetch_add(1, Ordering::SeqCst);
+                text("{}", false)
+            })
+            .register(tool("delete_record"), move |_| {
+                b.fetch_add(1, Ordering::SeqCst);
+                text("{}", false)
+            });
+        let sequence: Sequence = serde_yaml::from_str(
+            "name: s\nsteps:\n  - call: record_create\n  - call: delete_record\n    expect: ok\n",
+        )
+        .unwrap();
+        let plan = SequencePlan {
+            sequences: vec![sequence],
+            master_seed: 0,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            severity: SeverityConfig::default(),
+            fuzz_corpus: None,
+            mutate_ratio: 0.0,
+            detector: DestructiveDetector::from_config(
+                &crate::target::DestructiveConfig::default(),
+                &crate::target::AllowDestructiveConfig::default(),
+            )
+            .unwrap(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(report.blocked.len(), 1);
+        assert_eq!(report.blocked[0].tool, "delete_record");
+    }
+
+    /// Campaign regression (obsidian-mcp-server): a server that crashed
+    /// on the first path-traversal sequence failed all three as
+    /// `sequence_failure` "transport closed", filed under the pack's
+    /// sequence names. The crash is one `crash` finding on the tool, and
+    /// the next sequence runs on a fresh connection.
+    #[tokio::test]
+    async fn transport_failure_is_a_tool_finding_and_the_next_sequence_reconnects() {
+        let tool = |name: &str| {
+            rmcp::model::Tool::new(
+                name.to_string(),
+                String::new(),
+                std::sync::Arc::new(serde_json::Map::new()),
+            )
+        };
+        let mut client = crate::run::exec::MockClient::new()
+            .register(tool("list_notes"), |_| {
+                CallOutcome::Crash("Transport closed".to_string())
+            })
+            .register(tool("read_note"), |_| text("hello", false));
+        let parse = |yaml: &str| serde_yaml::from_str::<Sequence>(yaml).unwrap();
+        let plan = SequencePlan {
+            sequences: vec![
+                parse("name: first\nsteps:\n  - call: list_notes\n    expect: ok\n"),
+                parse("name: second\nsteps:\n  - call: read_note\n    expect: ok\n"),
+            ],
+            master_seed: 0,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            severity: SeverityConfig::default(),
+            fuzz_corpus: None,
+            mutate_ratio: 0.0,
+            detector: DestructiveDetector::from_config(
+                &crate::target::DestructiveConfig::default(),
+                &crate::target::AllowDestructiveConfig::default(),
+            )
+            .unwrap(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.passed, vec!["second".to_string()]);
+        assert_eq!(client.reconnect_count(), 1);
+        let findings = corpus.list_findings().unwrap();
+        assert_eq!(findings.len(), 1);
+        assert!(
+            matches!(findings[0].kind, FindingKind::Crash),
+            "{:?}",
+            findings[0].kind
+        );
+        assert_eq!(findings[0].tool, "list_notes");
+        assert!(
+            findings[0].message.contains("sequence `first`"),
+            "{}",
+            findings[0].message
+        );
+    }
 
     #[test]
     fn single_placeholder_preserves_type() {

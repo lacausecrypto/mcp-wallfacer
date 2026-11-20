@@ -15,6 +15,22 @@
 | `protected_tool` | string | `protected_resource` | Tool that requires an authenticated session token. |
 | `user` | string | `wallfacer-probe` | Username supplied to login_tool. |
 
+## Sequences
+
+### `auth-flow.token_revoked_after_logout`
+
+Login → call protected resource (must succeed) → logout → call
+protected resource again with the same token (MUST fail). A
+server that still honors the revoked token after logout has a
+session-fixation bug.
+
+1. `auth_login` — setup
+2. `protected_resource` — setup
+3. `auth_logout` — setup
+4. `protected_resource` — expect `error`
+
+- **Test fixtures:** 2 (`pass`, `fail`)
+
 ## Source
 
 Raw YAML, embedded into the binary at compile time:

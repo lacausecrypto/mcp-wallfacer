@@ -2,3 +2,5 @@
 .wallfacer/
 *.sarif
 
+
+campaign/runs*/

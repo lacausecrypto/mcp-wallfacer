@@ -18,7 +18,7 @@ use std::{
 use http::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult, Prompt, Resource, ServerCapabilities, Tool},
-    service::{RoleClient, RunningService, RxJsonRpcMessage, TxJsonRpcMessage},
+    service::{RoleClient, RunningService, RxJsonRpcMessage, ServiceError, TxJsonRpcMessage},
     transport::{
         async_rw::AsyncRwTransport, streamable_http_client::StreamableHttpClientTransportConfig,
         StreamableHttpClientTransport, Transport as RmcpTransport,
@@ -70,7 +70,39 @@ pub enum CallOutcome {
     Ok(CallToolResult),
     Hang(Duration),
     Crash(String),
+    /// The exchange itself broke: malformed or unexpected message, send
+    /// failure, cancelled request. Distinct from a well-formed error reply.
     ProtocolError(String),
+    /// The server answered with a well-formed JSON-RPC error. This is a
+    /// valid protocol exchange (the call was rejected or failed inside the
+    /// server), not a protocol violation.
+    JsonRpcError {
+        code: i32,
+        message: String,
+    },
+}
+
+impl CallOutcome {
+    /// Codes meaning the server rejected the request itself (bad JSON,
+    /// invalid request, unknown method, invalid params): a correct answer
+    /// to an invalid input, not a defect.
+    pub fn is_request_rejection(code: i32) -> bool {
+        matches!(code, -32700 | -32600 | -32601 | -32602)
+    }
+}
+
+/// Maps a failed `tools/call` to an outcome. A JSON-RPC error reply is
+/// `JsonRpcError` even if the transport closed right after: the server
+/// did answer this call.
+fn classify_call_error(error: ServiceError, transport_closed: bool) -> CallOutcome {
+    match error {
+        ServiceError::McpError(data) => CallOutcome::JsonRpcError {
+            code: data.code.0,
+            message: data.message.into_owned(),
+        },
+        other if transport_closed => CallOutcome::Crash(other.to_string()),
+        other => CallOutcome::ProtocolError(other.to_string()),
+    }
 }
 
 impl Client {
@@ -199,10 +231,7 @@ impl Client {
         };
         match time::timeout(timeout, service.call_tool(request)).await {
             Ok(Ok(result)) => CallOutcome::Ok(result),
-            Ok(Err(error)) if service.is_transport_closed() => {
-                CallOutcome::Crash(error.to_string())
-            }
-            Ok(Err(error)) => CallOutcome::ProtocolError(error.to_string()),
+            Ok(Err(error)) => classify_call_error(error, service.is_transport_closed()),
             Err(_) => CallOutcome::Hang(timeout),
         }
     }
@@ -231,7 +260,10 @@ async fn build_service(target: &Target) -> Result<RunningService<RoleClient, ()>
     let service = match &target.transport {
         TargetTransport::Stdio { command, args, env } => {
             let mut process = Command::new(command);
-            process.args(args).envs(env);
+            process
+                .args(args)
+                .envs(env)
+                .env(crate::canary::ENV_VAR, crate::canary::value());
             let transport = StdioChildTransport::spawn(process).map_err(ClientError::Spawn)?;
             ().serve(transport)
                 .await
@@ -347,5 +379,63 @@ impl RmcpTransport<RoleClient> for StdioChildTransport {
 
     fn close(&mut self) -> impl Future<Output = std::result::Result<(), Self::Error>> + Send {
         self.close_child()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use rmcp::model::ErrorData;
+
+    #[test]
+    fn json_rpc_error_reply_is_not_a_protocol_error() {
+        // Campaign regression: `-32602 invalid params` and `-32603` replies
+        // were reported as high-severity protocol errors.
+        let outcome = classify_call_error(
+            ServiceError::McpError(ErrorData::invalid_params("bad arg", None)),
+            false,
+        );
+        match outcome {
+            CallOutcome::JsonRpcError { code, message } => {
+                assert_eq!(code, -32602);
+                assert_eq!(message, "bad arg");
+            }
+            other => panic!("expected JsonRpcError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_rpc_error_reply_wins_over_a_closed_transport() {
+        let outcome = classify_call_error(
+            ServiceError::McpError(ErrorData::internal_error("boom", None)),
+            true,
+        );
+        assert!(matches!(
+            outcome,
+            CallOutcome::JsonRpcError { code: -32603, .. }
+        ));
+    }
+
+    #[test]
+    fn transport_failures_keep_their_classification() {
+        assert!(matches!(
+            classify_call_error(ServiceError::TransportClosed, true),
+            CallOutcome::Crash(_)
+        ));
+        assert!(matches!(
+            classify_call_error(ServiceError::UnexpectedResponse, false),
+            CallOutcome::ProtocolError(_)
+        ));
+    }
+
+    #[test]
+    fn request_rejection_codes() {
+        for code in [-32700, -32600, -32601, -32602] {
+            assert!(CallOutcome::is_request_rejection(code), "{code}");
+        }
+        for code in [-32603, -32000, -32099, 1] {
+            assert!(!CallOutcome::is_request_rejection(code), "{code}");
+        }
     }
 }

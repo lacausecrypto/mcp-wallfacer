@@ -4,6 +4,300 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
+## Unreleased
+
+Fixes found by the v0.8 real-world campaign (popular npm / PyPI MCP
+servers run in a network-less sandbox): most findings were false
+positives produced by wallfacer itself, and one class of real failures
+was hidden.
+
+### Security — rmcp 1.5 → 3.11 (RUSTSEC-2026-0462)
+
+rmcp before 3.9.0 buffered Streamable HTTP response bodies with no size
+limit: a hostile MCP server could exhaust the client's memory with an
+endless body, before authentication. Wallfacer connects to untrusted
+servers by design, so its HTTP transport was exposed. rmcp 3.11 caps
+JSON bodies at 16 MiB and error bodies at 64 KiB. The only API change
+wallfacer needed was the `Content` → `ContentBlock` rename in tests.
+tokio (1.54.1), anyhow (1.0.104) and rustix (1.1.6) are bumped past
+their unsoundness advisories. The chrono "unmaintained" notice is
+ignored in `deny.toml`: rmcp depends on chrono, so it stays in the
+graph either way.
+
+### CI
+
+- Coverage job gets `pull-requests: write` for its PR comment, and skips
+  the comment on fork PRs, whose token is read-only.
+- Fixed a rustdoc link to a private item and two typos flagged by `typos`.
+
+### Fixed — prompt-injection probes failed on their own echo
+
+The `prompt-injection` and `prompt-injection-v2` failure patterns
+(`system prompt`, `admin mode`, `JAILBROKEN`, `evil.example/exfil`,
+`password_hash`, …) appeared in the probes themselves, so any server that
+quoted its input failed them: a pydantic validation error repeating the
+probe was reported as a system-prompt leak. Every probe now asks the
+model to *build* its marker — the reverse of `DETNARG-NIMDA`, `JAIL` and
+`BROKEN` joined — and the leak patterns are chat-template role markers,
+API-key shapes and the canary, none of which a probe contains. A unit test
+checks every embedded pack: no `not matches_regex` pattern may match the
+probe of its own invariant or sequence step (it caught 17).
+
+### Changed — `auth` is opt-in; bearer-echo check removed
+
+`suggest` no longer proposes the `auth` pack.
+`auth.unauthenticated_requests_are_rejected` encodes an application
+contract (`isError` or `structuredContent.anonymous` on an anonymous
+`whoami`) and assumes the server runs without credentials. In the
+campaign it failed on a server that answered "Not logged in" in plain
+text, and on a `get_user_profile` tool called without its required
+`user_id`. A configured server legitimately returns its user.
+`auth.bearer_tokens_never_echoed` only flagged a server that repeats the
+token the client sent, which leaks nothing. Disclosure of the server's own
+secrets is covered for every server by the canary.
+
+### Fixed — sequence transport failures reported as `sequence_failure`
+
+When a server crashed or hung during a sequence step, the failure was
+filed under the sequence name as a `sequence_failure`, and the dead
+connection failed every later sequence with "transport closed": one
+crash in obsidian-mcp-server came out as three path-traversal failures.
+A transport failure is now a `crash`, `hang` or `protocol_error`
+finding on the tool the step called. A canary disclosure is a
+`secret_leak` finding. The runner reconnects before the next sequence,
+and a server that does not come back is an error, not a silent skip.
+
+### Fixed — side-effecting tools picked as probe witnesses
+
+Tools named with `run`, `exec`, `execute`, `start`, `stop`, `kill`,
+`launch`, `spawn`, `trigger`, `deploy` or `install` are no longer chosen
+as witnesses for the hostile-input packs. `workers_run` had become the
+path-traversal read witness and was sent UNC paths.
+
+### Fixed — 10 MiB fuzz strings flagged every tool of TypeScript servers
+
+One adversarial string in ten was 10 MiB, exactly the per-message cap of
+the TypeScript SDK's stdio transport, which closes the session above it.
+Every string-taking tool of such a server came out as a hang or a crash:
+380 of the campaign's 421 fuzz hangs. Fuzz strings now top out at 1 MiB
+(`MAX_FUZZ_STRING_LEN`), and the long strings (> 1 KiB) of one payload
+share a 2 MiB budget (`MAX_FUZZ_LONG_STRING_BYTES`): a 100-item array of
+objects otherwise gave every string field its own 1 MiB value (15 MiB
+seen on a crawl tool). Strings past the budget are truncated to 1 KiB and
+the cut is recorded in the finding's composition trail. The transport cap
+is a property of the SDK, not of the server under test, and is no longer
+probed.
+
+### Fixed — `internal_error` on payloads that violate the declared schema
+
+Adversarial payloads put `123` where a string is declared or a non-URL
+in a `format: uri` field; a server answering `-32603` ("path.includes is
+not a function", "Invalid url") was reported. Fuzz now validates each
+payload against the tool's input schema (formats included): any JSON-RPC
+error reply to a schema-violating payload is a correct rejection, not a
+finding. Replies to schema-valid payloads are still reported.
+
+### Fixed — `property` re-probed tools that had already timed out
+
+A server waiting on credentials hung on every call, and each of its
+invariants re-reported the same hang after burning the full timeout
+(106 hangs for one server). Once a tool times out, its remaining
+invariants are skipped with a reason and listed in
+`PropertyReport.skipped_after_hang`; the hang is reported once.
+
+### Changed — `secrets-leakage` detects real leaks via a canary secret
+
+The pack sent secret-looking strings and failed when the response echoed
+them: any tool quoting its input (a status line repeating a path) was a
+"leak". Wallfacer now spawns every stdio server with
+`WALLFACER_CANARY_SECRET=wfcanary_<32 random hex>` in its environment, a
+value never sent in any request. Fuzz, property and sequence runners
+report any result containing it as the new **`secret_leak`** finding
+kind (critical, SARIF rule `secret_leak`): the server disclosed its own
+environment. `replay`, `corpus replay` and `corpus minimize` reproduce
+it. The rewritten pack probes env-reference expansion (`$VAR`, `${VAR}`,
+`%VAR%`, `${process.env.VAR}`); the old echo invariants
+(`secrets.bearer_tokens_not_echoed`, …) are removed. HTTP targets are not
+spawned by wallfacer, so nothing is planted for them. Wrappers that
+launch the server through `docker run` must forward the variable
+(`-e WALLFACER_CANARY_SECRET`).
+
+### Changed — `path-traversal` only flags servers that enforce a root
+
+Servers with full filesystem access by design (no allowed directory
+configured) were reported for reading `/etc/shadow` and `../etc/passwd`.
+Each probe is now a sequence: a `require` step first checks the read
+tool refuses (or doesn't leak) the absolute path `/etc/passwd`; only
+then is a `../`, encoded `../` or UNC leak a traversal. Without a root,
+the probe is inconclusive. The UNC probe checks for remote content
+instead of demanding `isError` (echoing the path back is not a leak),
+the `/etc/passwd` pattern matches any shell (`/bin/ash` on Alpine), and
+the write probe is gated the same way. Invariants renamed:
+`path.dotdot_segments_blocked_by_read_file`,
+`path.url_encoded_dotdot_blocked_by_read_file`,
+`path.windows_unc_not_followed_by_read_file`,
+`path.dotdot_write_escape_blocked`; `path.absolute_paths_outside_root_rejected`
+became the precondition.
+
+### Added — `require:` preconditions on sequence steps
+
+A list of assertions the step's `{input, response}` must satisfy for the
+rest of the sequence to mean anything; when one fails, the sequence is
+inconclusive. A `require` step is never mutated from the corpus.
+
+### Fixed — sequences bypassed the destructive-tool guard
+
+The property runner skipped invariants on destructive tools outside
+`[allow_destructive]`; sequences called them anyway (`stateful`'s
+`delete_tool`). A sequence with a blocked step is now skipped whole and
+listed in `SequenceReport.blocked`.
+
+### Fixed — meta-packs dropped their parents' sequences
+
+`extends` imported invariants and `for_each_tool` blocks but not
+`sequences`, so `--pack security` silently lost the path-traversal
+probes (as would any meta-pack extending `stateful` or `auth-flow`).
+
+### Fixed — `large-payload` never sent a large payload
+
+The DSL runner clamped generated strings to 1024 characters and arrays
+to 64 items, so the "64 KiB" probe sent 1 KiB and the array probe sent
+`[]`. `generate:` lengths are now honoured up to 16 MiB / 1 000 000
+items, and a spec past those limits is a parse error instead of a silent
+clamp. The pack now sends 64 KiB and 1 MiB strings and a 10 000-item
+integer array; `suggest` picks a tool with an integer-array field as the
+array witness.
+
+### Fixed — `suggest` witness selection
+
+- The witness search gave up on the whole server when the first tool had
+  no `properties`.
+- Hostile probes (`secrets-leakage`, `unicode`, `large-payload`) could
+  target a state-changing tool (`create_scene`); state-changing tools are
+  never witnesses now. Reflectors (`echo`) are a fallback rather than
+  excluded, since no pack flags reflection any more.
+
+### Fixed — SARIF rules missing for emitted rule ids
+
+`internal_error` and `sequence_failure` results referenced rules the
+SARIF `tool.driver.rules` array did not declare.
+
+### Changed — pack docs list sequences
+
+`gen-pack-docs` renders a "Sequences" section (steps with their role:
+setup, precondition, expect, assert).
+
+### Changed — example server
+
+`read_file` now has the realistic traversal bug (refuses absolute paths,
+joins `../` unnormalised) instead of serving every path, and the new
+`show_config` tool demonstrates `secret_leak`.
+
+### Fixed — JSON-RPC error replies were reported as protocol errors
+
+Any JSON-RPC error a server returned for a tool call (`-32602 invalid
+params`, `-32603 internal error`…) became a high-severity
+`protocol_error`, although a well-formed error reply is a valid
+exchange. On the campaign this was most of the remaining findings. The
+client now distinguishes `CallOutcome::JsonRpcError { code, message }`
+from a broken exchange (`ProtocolError`):
+
+- `fuzz`: request rejections (`-32700`, `-32600..-32602`) are the correct
+  answer to a generated payload and are not reported. Other codes
+  (`-32603`, server-defined `-32000..-32099`) mean the tool threw on that
+  input: new `internal_error { code }` finding kind, low severity, no
+  reconnect.
+- `property`, sequences, `corpus minimize`: the reply is evaluated as an
+  `isError: true` result, since it is a rejection.
+- `torture`: a request rejection counts as a completed call; an internal
+  error under concurrency still counts as a failure (race signal).
+- `replay` / `corpus minimize --replay` reproduce `internal_error` by code.
+
+New finding kind: consumers matching on `kind.type` should handle
+`internal_error` (SARIF rule `internal_error`).
+
+### Fixed — `doctor` aborted when a declared listing failed
+
+A server that declares the `resources` or `prompts` capability but
+answers `-32601 Method not found` made `doctor` exit with an error, so
+the target looked like it never started. `doctor` now lists the tools,
+shows `error` in that column and explains the failure on stderr.
+
+### Fixed — sequences reported failed setups as state leaks
+
+When a precondition step failed (the `stateful` probe's `create` call
+rejecting generic arguments), or a later step referenced a value the
+setup never returned, the sequence was a `sequence_failure`. A *setup*
+step (no `expect`, `require` or `assert`) that returns `isError`, or a
+reference that doesn't resolve, now makes the sequence inconclusive
+(skipped, no finding). Explicit `expect` mismatches, assertion failures
+and transport failures still fail it. Sequence fixtures accept
+`expect: inconclusive`.
+
+Sequence step semantics, in full: `expect` is the only outcome-class
+check (a step with assertions but no `expect` is decided by its
+assertions alone, so "refused, or leaks nothing" can pass on `isError`);
+the new `require:` list is an explicit precondition (see below).
+
+### Fixed — more pack and heuristic false positives
+
+- `suggest` matched name heuristics as substrings: `customerDataProvider`
+  and `tools_documentation` became `whoami` tools (`me`),
+  `execute_insights_query` a shell tool (`exec`), and `compute_output` a
+  mutating tool (`put`). Names are now split into words (snake, kebab,
+  camelCase) and matched whole.
+- `injection-sql`: the drop-acknowledgement pattern matched any
+  "truncated", including the JSON key `"truncated": false`. It now
+  requires a table context (`table users dropped`, `dropped table`).
+- `tool-annotations.open_world_no_internal_path_leak` flagged any
+  `/home/...` path, including usage examples like `/home/user/my-project`.
+  It now targets source files, `node_modules` / `site-packages` and
+  `line:col` stack-trace references under a home directory.
+- `unicode`: `rtl_override_does_not_crash_or_panic` required tools to
+  reject RTL overrides, and `zero_width_joiner_handled` failed when the
+  ZWJ (valid in emoji sequences) was echoed back. Both now check that the
+  reply stays a well-formed envelope; crashes and hangs are reported by
+  the runner.
+
+### Fixed — `property` and sequences reported crashed servers as passing
+
+The property and sequence runners rewrote a hang, crash or protocol
+error into a synthetic `{"isError": true}` envelope and evaluated the
+invariant against it. Every invariant with an "or the call errored"
+branch (path-traversal, unicode, `expect: error` sequence steps…)
+therefore **passed on a dead server**. The example fixture shows it:
+`divide(_, 0)` exits the process, yet "divide(_, 0) returns isError"
+passed. Transport failures are now reported as their own `crash` /
+`hang` / `protocol_error` finding, naming the invariant in `details`;
+in a sequence they fail the step. Consumers that assumed `property`
+only emits `property_failure` / `sequence_failure` should handle these
+kinds.
+
+### Fixed — `suggest` generated configs that `property` rejected
+
+`suggest` emitted `path_field` for `path-traversal`, a parameter the
+pack did not declare, so `property` aborted before running any pack.
+The pack now declares `path_field` (default `path`) and uses it as the
+probe's argument name. `suggest` also no longer points the pack at
+mutating tools (`create_directory`, `write_*`, …) or sets
+`write_file_tool` to a read tool. A new test resolves every suggestion
+against its embedded pack.
+
+### Fixed — `idempotency` required optional MCP fields
+
+`isError` and `structuredContent` are optional in the MCP spec (absent
+`isError` means `false`). The pack failed every text-only response;
+it now only checks their type when present.
+
+### Changed
+
+- `examples/python_server`: `list_active_users` now returns a string
+  `isError` (a real violation) instead of a spec-valid envelope.
+- `examples/python_server`: `bad_protocol` now answers with a result that
+  is not a valid `CallToolResult` (a real protocol violation); its former
+  behaviour (raising, turned into a `-32603` reply) moved to the new
+  `throws_internally` tool, which triggers `internal_error`.
+
 ## v0.8.1 — 2026-05-01
 
 Patch release fixing four issues found by a self-audit + battle-test

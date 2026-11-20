@@ -45,6 +45,11 @@ pub struct PropertyReport {
     /// pack parameter or accept the gap.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_tools: Vec<MissingTool>,
+    /// Invariants not evaluated because their tool had already timed out
+    /// earlier in the run (the hang itself is reported once, as a
+    /// finding).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_after_hang: Vec<String>,
 }
 
 /// One invariant skipped because its target tool is not advertised by
@@ -233,8 +238,27 @@ impl PropertyPlan {
             missing_tools,
             ..PropertyReport::default()
         };
+        // Tools that already timed out in this run. Every further probe
+        // of such a tool would most likely burn the full timeout again
+        // and re-report the same hang under another invariant name.
+        let mut unresponsive: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for invariant in &runnable_invariants {
             let cases = invariant.cases.unwrap_or(self.default_cases).max(1);
+            if unresponsive.contains(&invariant.tool) {
+                reporter.on_skipped(
+                    &invariant.tool,
+                    &format!(
+                        "timed out earlier in this run (invariant `{}` not evaluated)",
+                        invariant.name
+                    ),
+                );
+                report.skipped_after_hang.push(invariant.name.clone());
+                for case_index in 0..cases {
+                    reporter.on_iteration_end(&invariant.tool, case_index as u64);
+                }
+                continue;
+            }
             for case_index in 0..cases {
                 reporter.on_iteration_start(&invariant.tool, case_index as u64);
                 let seed = derive_seed(self.master_seed, &invariant.name, case_index as u64);
@@ -259,26 +283,55 @@ impl PropertyPlan {
                 } else {
                     runner::input_for_case(invariant, case_index, &mut rng)
                 };
-                let response = invoke(client, &invariant.tool, input.clone(), self.timeout).await;
-
                 let live_tool = tool_index.get(&invariant.tool).copied();
-                if let Err(error) = runner::evaluate_with_tool(
-                    invariant,
-                    input.clone(),
-                    response.clone(),
-                    live_tool,
-                ) {
+                let failure =
+                    match invoke(client, &invariant.tool, input.clone(), self.timeout).await {
+                        Ok(response) if crate::canary::leaked_in(&response.to_string()) => Some((
+                            FindingKind::SecretLeak,
+                            "response disclosed the server's environment",
+                            format!(
+                                "{} (invariant `{}`)\ninput: {}",
+                                super::fuzz::canary_leak_details(&response),
+                                invariant.name,
+                                serde_json::to_string_pretty(&input).unwrap_or_default(),
+                            ),
+                        )),
+                        Ok(response) => runner::evaluate_with_tool(
+                            invariant,
+                            input.clone(),
+                            response.clone(),
+                            live_tool,
+                        )
+                        .err()
+                        .map(|error| {
+                            (
+                                FindingKind::PropertyFailure {
+                                    invariant: invariant.name.clone(),
+                                },
+                                "property invariant failed",
+                                format!(
+                                    "{error}\ninput: {}\nresponse: {}",
+                                    serde_json::to_string_pretty(&input).unwrap_or_default(),
+                                    serde_json::to_string_pretty(&response).unwrap_or_default(),
+                                ),
+                            )
+                        }),
+                        Err((kind, message, details)) => Some((
+                            kind,
+                            message,
+                            format!(
+                                "{details} (invariant `{}`)\ninput: {}",
+                                invariant.name,
+                                serde_json::to_string_pretty(&input).unwrap_or_default(),
+                            ),
+                        )),
+                    };
+                if let Some((kind, message, details)) = failure {
                     let mut finding = Finding::new(
-                        FindingKind::PropertyFailure {
-                            invariant: invariant.name.clone(),
-                        },
+                        kind,
                         invariant.tool.clone(),
-                        "property invariant failed",
-                        format!(
-                            "{error}\ninput: {}\nresponse: {}",
-                            serde_json::to_string_pretty(&input).unwrap_or_default(),
-                            serde_json::to_string_pretty(&response).unwrap_or_default(),
-                        ),
+                        message,
+                        details,
                         ReproInfo {
                             seed,
                             tool_call: input,
@@ -289,10 +342,15 @@ impl PropertyPlan {
                     if let Some(override_sev) = self.severity.resolve(finding.kind.keyword()) {
                         finding = finding.with_severity(override_sev);
                     }
+                    if matches!(finding.kind, FindingKind::Hang { .. }) {
+                        unresponsive.insert(invariant.tool.clone());
+                    }
                     corpus.write_finding(&finding)?;
                     reporter.on_finding(&finding);
                     report.findings_count += 1;
-                    reporter.on_iteration_end(&invariant.tool, case_index as u64);
+                    for remaining in case_index..cases {
+                        reporter.on_iteration_end(&invariant.tool, remaining as u64);
+                    }
                     break;
                 }
                 reporter.on_iteration_end(&invariant.tool, case_index as u64);
@@ -306,36 +364,56 @@ impl PropertyPlan {
     }
 }
 
+/// Error-result envelope standing in for a JSON-RPC error reply, so
+/// invariants and sequence steps see the rejection as `isError: true`.
+pub fn json_rpc_error_envelope(code: i32, message: &str) -> Value {
+    json!({
+        "content": [{"type": "text", "text": format!("JSON-RPC error {code}: {message}")}],
+        "isError": true,
+    })
+}
+
+/// Transport-level failure of a property probe: reported as its own
+/// finding kind, never evaluated against the invariant.
+type ProbeFailure = (FindingKind, &'static str, String);
+
+/// Calls the tool once. A hang, crash or protocol error comes back as
+/// `Err` so the caller reports it as such: rewriting it into an
+/// `isError: true` envelope (pre-v0.8.2 behaviour) made every invariant
+/// with an "or the call errored" branch pass on a crashed server.
 async fn invoke<C: McpExec + ?Sized>(
     client: &mut C,
     tool: &str,
     input: Value,
     timeout: Duration,
-) -> Value {
-    match client.call_tool(tool, input, timeout).await {
-        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
-        CallOutcome::Hang(duration) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-                "isError": true,
-            })
+) -> std::result::Result<Value, ProbeFailure> {
+    let failure = match client.call_tool(tool, input, timeout).await {
+        CallOutcome::Ok(result) => return Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+        // The server answered and rejected the call: evaluate it as the
+        // error result it is. Unlike a crash, this is a real rejection.
+        CallOutcome::JsonRpcError { code, message } => {
+            return Ok(json_rpc_error_envelope(code, &message))
         }
-        CallOutcome::Crash(reason) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": reason}],
-                "isError": true,
-            })
-        }
-        CallOutcome::ProtocolError(message) => {
-            client.reconnect().await.ok();
-            json!({
-                "content": [{"type": "text", "text": message}],
-                "isError": true,
-            })
-        }
-    }
+        CallOutcome::Hang(duration) => (
+            FindingKind::Hang {
+                ms: duration.as_millis() as u64,
+            },
+            "tool call timed out",
+            format!("timeout exceeded after {duration:?}"),
+        ),
+        CallOutcome::Crash(reason) => (
+            FindingKind::Crash,
+            "server crashed during tool call",
+            reason,
+        ),
+        CallOutcome::ProtocolError(message) => (
+            FindingKind::ProtocolError,
+            "protocol error during tool call",
+            message,
+        ),
+    };
+    client.reconnect().await.ok();
+    Err(failure)
 }
 
 /// Parses an invariants YAML file into an [`InvariantFile`] for use with
@@ -508,6 +586,68 @@ mod tests {
         CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![]))
     }
 
+    /// Campaign regression: a server waiting on credentials hung on every
+    /// call, and each of its ~40 invariants re-reported the same hang
+    /// after burning the full timeout.
+    #[tokio::test]
+    async fn tool_that_timed_out_is_not_probed_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let mut client = MockClient::new()
+            .register(tool("list_apps"), move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                CallOutcome::Hang(Duration::from_secs(1))
+            })
+            .register(tool("ping"), |_| CallOutcome::Hang(Duration::from_secs(1)));
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: first
+    tool: list_apps
+    fixed: { space: "a" }
+    assert: []
+  - name: second
+    tool: list_apps
+    fixed: { space: "b" }
+    assert: []
+  - name: other_tool
+    tool: ping
+    fixed: {}
+    assert: []
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 3,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.skipped_after_hang, vec!["second".to_string()]);
+        // A hang on one tool does not silence the others.
+        assert_eq!(report.findings_count, 2);
+    }
+
     fn for_each_file() -> dsl::InvariantFile {
         // No-op assertion list keeps the run free of findings while
         // still exercising on_iteration_start once per (tool, case).
@@ -521,6 +661,111 @@ for_each_tool:
       assert: []
 ";
         dsl::parse(yaml).expect("parse for_each yaml")
+    }
+
+    /// Regression: transport failures used to be rewritten into an
+    /// `isError: true` envelope, so an invariant with an "or the call
+    /// errored" branch passed on a crashed server and reported nothing.
+    #[tokio::test]
+    async fn crash_is_reported_not_evaluated_as_error_envelope() {
+        let mut client = MockClient::new().register(tool("read_file"), |_| {
+            CallOutcome::Crash("process exited".to_string())
+        });
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: traversal_rejected
+    tool: read_file
+    fixed: { path: "../../etc/passwd" }
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(report.findings_count, 1);
+        assert_eq!(client.reconnect_count(), 1);
+        let findings = corpus.list_findings().expect("list");
+        assert!(
+            matches!(findings[0].kind, FindingKind::Crash),
+            "{:?}",
+            findings[0].kind
+        );
+    }
+
+    /// A JSON-RPC error reply is a real rejection: an invariant that
+    /// expects the call to be refused passes, and nothing is reported.
+    #[tokio::test]
+    async fn json_rpc_error_reply_counts_as_rejection() {
+        let mut client =
+            MockClient::new().register(tool("read_file"), |_| CallOutcome::JsonRpcError {
+                code: -32602,
+                message: "path outside root".to_string(),
+            });
+        let file = dsl::parse(
+            r#"
+version: 2
+invariants:
+  - name: traversal_rejected
+    tool: read_file
+    fixed: { path: "../../etc/passwd" }
+    assert:
+      - kind: equals
+        lhs: { path: "$.response.isError" }
+        rhs: { value: true }
+"#,
+        )
+        .expect("parse");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus = Corpus::new(tmp.path().join("corpus"));
+        let plan = PropertyPlan {
+            file,
+            default_cases: 1,
+            master_seed: 1,
+            timeout: Duration::from_secs(1),
+            transport_name: "mock".to_string(),
+            detector: detector(),
+            severity: SeverityConfig::default(),
+            defer_run_end: false,
+            max_tools: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+        };
+        let report = plan
+            .execute(
+                &mut client,
+                &corpus,
+                &mut crate::run::reporter::NoopReporter,
+            )
+            .await
+            .expect("plan executes");
+        assert_eq!(report.findings_count, 0);
+        assert_eq!(client.reconnect_count(), 0);
     }
 
     #[tokio::test]

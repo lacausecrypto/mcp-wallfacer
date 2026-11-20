@@ -17,7 +17,7 @@
 
 - **Where:** annotations.openWorldHint = `true`
 - **Apply assertions:** any_of(2 child)
-- **Test fixtures:** 3 (`pass`, `pass`, `fail`)
+- **Test fixtures:** 6 (`pass`, `pass`, `fail`, `pass`, `fail`, `fail`)
 
 ## Source
 
@@ -104,7 +104,11 @@ for_each_tool:
               assertion:
                 kind: matches_regex
                 path: "$.response.content[0].text"
-                pattern: "(?:/Users/|/home/|C:\\\\\\\\Users)[^\\s]+"
+                # A file under a home directory that is a source file, a
+                # dependency, or a stack-trace `line:col` reference: the
+                # server's own layout. A bare `/home/user/my-project` in a
+                # usage hint is documentation, not a leak.
+                pattern: '(?:/Users/|/home/|C:\\{1,2}Users\\{1,2})\S*?(?:\.(?:js|mjs|cjs|ts|tsx|py|rb|go|rs|java|php|cs)\b|/node_modules/|/site-packages/|:\d+:\d+)'
       test_fixtures:
         - name: "passes when text is sanitised"
           response: { content: [{ type: "text", text: "service unavailable" }] }
@@ -116,5 +120,20 @@ for_each_tool:
           response:
             content:
               - { type: "text", text: "error at /home/server/app/main.py" }
+          expect: fail
+        - name: "passes when a usage hint shows an example path"
+          response:
+            content:
+              - { type: "text", text: "Example: `/home/user/my-project` (not `./my-project`)" }
+          expect: pass
+        - name: "fails when a stack trace exposes a dependency path"
+          response:
+            content:
+              - { type: "text", text: "at run (/Users/dev/app/node_modules/x/index.js:10:5)" }
+          expect: fail
+        - name: "fails when a Windows source path leaks"
+          response:
+            content:
+              - { type: "text", text: "failed in C:\\Users\\dev\\app\\server.ts" }
           expect: fail
 ```

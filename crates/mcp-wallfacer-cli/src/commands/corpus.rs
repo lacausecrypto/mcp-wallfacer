@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Table};
-use serde_json::{json, Value};
+use serde_json::Value;
 use wallfacer_core::{
     client::{CallOutcome, Client},
     corpus::Corpus,
@@ -176,6 +176,16 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
         (FindingKind::ProtocolError, CallOutcome::ProtocolError(_)) => {
             "same protocol error".to_string()
         }
+        (FindingKind::InternalError { code: want }, CallOutcome::JsonRpcError { code, .. })
+            if *want == code =>
+        {
+            "same internal error".to_string()
+        }
+        (FindingKind::SecretLeak, CallOutcome::Ok(result))
+            if wallfacer_core::canary::leaked_in_result(&result) =>
+        {
+            "same secret leak (canary disclosed)".to_string()
+        }
         (_, CallOutcome::Ok(result)) => {
             let value = serde_json::to_value(result).unwrap_or(Value::Null);
             format!("replayed ok: {}", compact_json(&value))
@@ -183,6 +193,9 @@ async fn replay_one(client: &Client, finding: &Finding, timeout_ms: u64) -> Stri
         (_, CallOutcome::Hang(_)) => "replayed hang".to_string(),
         (_, CallOutcome::Crash(message)) => format!("replayed crash: {message}"),
         (_, CallOutcome::ProtocolError(message)) => format!("replayed protocol error: {message}"),
+        (_, CallOutcome::JsonRpcError { code, message }) => {
+            format!("replayed JSON-RPC error {code}: {message}")
+        }
     }
 }
 
@@ -327,9 +340,10 @@ async fn minimize(
                 // re-run the assertions. "Still fires" means the
                 // assertions failed — i.e. the trial input still
                 // breaks the same invariant.
-                let response = call_outcome_to_response(&outcome);
-                runner::evaluate_with_tool(&invariant, candidate, response, live_tool.as_ref())
-                    .is_err()
+                call_outcome_to_response(&outcome).is_some_and(|response| {
+                    runner::evaluate_with_tool(&invariant, candidate, response, live_tool.as_ref())
+                        .is_err()
+                })
             } else {
                 target_kind.matches_outcome(&outcome)
             }
@@ -374,26 +388,18 @@ fn find_invariant_in_embedded_packs(name: &str) -> Option<Invariant> {
     None
 }
 
-/// Phase AC.1 — mirrors the response shape `PropertyPlan::execute`
-/// builds in `wallfacer_core::run::property`. Re-runs of an
-/// invariant must see the same `{content, isError}` envelope shape
-/// as the original run, otherwise the JSONPath assertions wouldn't
-/// match the same fields.
-fn call_outcome_to_response(outcome: &CallOutcome) -> Value {
+/// Mirrors how `PropertyPlan::execute` turns a call into the response an
+/// invariant is evaluated against. A JSON-RPC error reply becomes the same
+/// error-result envelope; a hang, crash or protocol error is not evaluated
+/// at all (the property runner reports it as its own finding kind), so it
+/// returns `None` and never counts as reproducing the invariant failure.
+fn call_outcome_to_response(outcome: &CallOutcome) -> Option<Value> {
     match outcome {
-        CallOutcome::Ok(result) => serde_json::to_value(result).unwrap_or(Value::Null),
-        CallOutcome::Hang(duration) => json!({
-            "content": [{"type": "text", "text": format!("timeout after {duration:?}")}],
-            "isError": true,
-        }),
-        CallOutcome::Crash(reason) => json!({
-            "content": [{"type": "text", "text": reason}],
-            "isError": true,
-        }),
-        CallOutcome::ProtocolError(message) => json!({
-            "content": [{"type": "text", "text": message}],
-            "isError": true,
-        }),
+        CallOutcome::Ok(result) => Some(serde_json::to_value(result).unwrap_or(Value::Null)),
+        CallOutcome::JsonRpcError { code, message } => Some(
+            wallfacer_core::run::property::json_rpc_error_envelope(*code, message),
+        ),
+        CallOutcome::Hang(_) | CallOutcome::Crash(_) | CallOutcome::ProtocolError(_) => None,
     }
 }
 

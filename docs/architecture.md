@@ -60,6 +60,7 @@ mcp-wallfacer/
 
 | Module | Role |
 |---|---|
+| [`canary`](../crates/wallfacer-core/src/canary.rs) | Canary secret planted in the environment of spawned stdio servers (see below) |
 | [`client`](../crates/wallfacer-core/src/client.rs) | `Arc<RwLock<RunningService>>` wrapper around `rmcp` (Phase E1) |
 | [`corpus`](../crates/wallfacer-core/src/corpus.rs) | Finding persistence + cooperative locks (Phase A5 / E3) |
 | [`differential`](../crates/wallfacer-core/src/differential.rs) | Schema inference helpers + boundary-payload generator |
@@ -103,12 +104,46 @@ let report = plan.execute(&mut client, &corpus, &mut reporter).await?;
    - `derive_seed_canonical` produces a 256-bit seed; `ChaCha20Rng`
      drives a `try_generate_payload` call (Phase B + E5).
    - On `Skip`, the tool is recorded in `report.skipped` and we move on.
-   - On call success, no finding.
+   - On call success, no finding — unless the result contains the
+     canary secret: a `SecretLeak` finding (critical), no reconnect.
+   - A JSON-RPC error reply that rejects the request (`-32700`,
+     `-32600..-32602`) is a correct answer to a generated payload: no
+     finding. Neither is *any* JSON-RPC error reply to a payload that
+     violates the tool's declared input schema (formats included):
+     adversarial payloads often do, and rejecting them is correct
+     whatever the code.
    - On `Hang/Crash/ProtocolError`, a `Finding` is built, written to
      `Corpus`, surfaced via `Reporter::on_finding`, and the plan calls
      `client.reconnect()` so subsequent iterations have a fresh
      transport (Phase E1).
+   - On any other JSON-RPC error reply (`-32603`, server-defined
+     codes) to a schema-valid payload, an `InternalError { code }`
+     finding (low severity) is recorded without reconnecting: the
+     session is still healthy.
+   - Generated strings top out at 1 MiB, and a payload's long strings
+     share a 2 MiB budget: past the 10 MiB per-message cap of common SDK
+     stdio transports, a payload tests the transport, not the tool.
+   - `property` and sequences evaluate a JSON-RPC error reply as an
+     `isError: true` result (it is a rejection); hang, crash and
+     protocol error are reported as their own finding kinds and never
+     evaluated against the invariant. Once a tool has timed out in a
+     `property` run, its remaining invariants are skipped
+     (`skipped_after_hang`) instead of each burning the timeout again.
 4. `Reporter::on_run_end()` flushes summary tables / final JSON / SARIF.
+
+### Canary secret
+
+Every stdio target is spawned with `WALLFACER_CANARY_SECRET` set to
+`wfcanary_` + 32 random hex digits, generated per wallfacer process and
+never sent in any request. Fuzz, property and sequence runners check
+every result for it: a match can only come from the server disclosing
+its own environment (a debug tool dumping `process.env`, `$VAR`
+expansion of user input, a serialised config in an error), so it is
+reported as `SecretLeak` with no false positive from input reflection.
+The value is not a credential and is safe to persist. HTTP targets are
+not spawned by wallfacer: nothing is planted. Wrappers that launch the
+server through another process (e.g. `docker run`) must forward the
+variable (`-e WALLFACER_CANARY_SECRET`).
 
 `TortureRun` is a sibling: it fans out parallel calls under a shared
 `CancellationToken` whose watchdog fires after `global_deadline = 4 ×

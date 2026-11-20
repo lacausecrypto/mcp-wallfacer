@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 #[test]
-fn property_reports_single_paginate_failure() {
+fn property_reports_paginate_failure_and_divide_crash() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let _ = std::fs::remove_dir_all(workspace_root.join(".wallfacer"));
 
@@ -31,7 +31,20 @@ fn property_reports_single_paginate_failure() {
 
     let report: Value = serde_json::from_slice(&output).expect("valid findings JSON");
     let findings = report["findings"].as_array().expect("findings array");
-    assert_eq!(findings.len(), 1, "expected exactly 1 property finding");
-    assert_eq!(findings[0]["tool"], "paginate");
-    assert_eq!(findings[0]["kind"]["type"], "property_failure");
+    assert_eq!(
+        findings.len(),
+        2,
+        "expected paginate failure + divide crash"
+    );
+    let by_tool = |tool: &str| {
+        findings
+            .iter()
+            .find(|f| f["tool"] == tool)
+            .unwrap_or_else(|| panic!("no finding on `{tool}`: {findings:?}"))
+    };
+    assert_eq!(by_tool("paginate")["kind"]["type"], "property_failure");
+    // `divide(_, 0)` exits the process. Before v0.8.2 the runner turned
+    // the crash into `isError: true`, so "divide(_, 0) returns isError"
+    // passed on a dead server.
+    assert_eq!(by_tool("divide")["kind"]["type"], "crash");
 }

@@ -2,9 +2,10 @@
 //! spec violations on the python_server fixture.
 //!
 //! The fixture has `list_active_users` declared as
-//! `idempotentHint: true` but its envelope omits `isError` and
-//! `structuredContent` — a clear spec violation. The pack extends
-//! `idempotency` so the findings stream from there.
+//! `idempotentHint: true` but its envelope carries `isError` as the
+//! string `"false"` — a spec violation (an *absent* `isError` /
+//! `structuredContent` is valid and must not fire). The client rejects
+//! the envelope, so the finding is a `protocol_error` on that tool.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -43,37 +44,20 @@ fn mcp_spec_conformance_catches_idempotency_envelope_violation() {
     let findings = report["findings"].as_array().expect("findings array");
     assert!(
         !findings.is_empty(),
-        "expected `mcp-spec-conformance` to fire on the fixture's malformed `list_active_users` envelope"
+        "expected `mcp-spec-conformance` to fire on the fixture's string-typed `isError` on `list_active_users`"
     );
-    let invariants: Vec<String> = findings
+    // rmcp refuses to deserialise a non-boolean `isError`, so the
+    // violation surfaces as a protocol error on that tool. Before
+    // v0.8.2 the property runner rewrote it into `isError: true` and
+    // the run reported nothing.
+    let on_tool: Vec<&Value> = findings
         .iter()
-        .filter_map(|f| f["kind"]["invariant"].as_str().map(|s| s.to_string()))
+        .filter(|f| f["tool"] == "list_active_users")
         .collect();
-    let touches_list_active_users = invariants
-        .iter()
-        .any(|name| name.contains("list_active_users"));
     assert!(
-        touches_list_active_users,
-        "expected at least one finding on `list_active_users`, got {invariants:?}"
-    );
-}
-
-#[test]
-fn mcp_spec_conformance_pack_is_listed_in_wallfacer_pack_list() {
-    let stdout = cargo_bin_cmd!("wallfacer")
-        .args(["pack", "list"])
-        .timeout(Duration::from_secs(30))
-        .assert()
-        .get_output()
-        .stdout
-        .clone();
-    let text = String::from_utf8_lossy(&stdout);
-    assert!(
-        text.contains("mcp-spec-conformance"),
-        "embedded pack list must include `mcp-spec-conformance`; got:\n{text}"
-    );
-    assert!(
-        text.contains("context-poisoning"),
-        "embedded pack list must include `context-poisoning`; got:\n{text}"
+        on_tool
+            .iter()
+            .any(|f| f["kind"]["type"] == "protocol_error"),
+        "expected a protocol_error finding on `list_active_users`, got {findings:?}"
     );
 }

@@ -82,11 +82,24 @@ fn verdict(finding: &Finding, outcome: &CallOutcome) -> String {
         (FindingKind::ProtocolError, CallOutcome::ProtocolError(_)) => {
             "reproduced: same protocol error".to_string()
         }
+        (FindingKind::InternalError { code: want }, CallOutcome::JsonRpcError { code, .. })
+            if want == code =>
+        {
+            "reproduced: same internal error".to_string()
+        }
+        (FindingKind::SecretLeak, CallOutcome::Ok(result))
+            if wallfacer_core::canary::leaked_in_result(result) =>
+        {
+            "reproduced: response still discloses the canary secret".to_string()
+        }
         (_, CallOutcome::Ok(_)) => "did not reproduce: tool call succeeded".to_string(),
         (_, CallOutcome::Hang(_)) => "did not reproduce: hang on this run".to_string(),
         (_, CallOutcome::Crash(_)) => "did not reproduce: different crash".to_string(),
         (_, CallOutcome::ProtocolError(message)) => {
             format!("did not reproduce: protocol error `{message}`")
+        }
+        (_, CallOutcome::JsonRpcError { code, message }) => {
+            format!("did not reproduce: JSON-RPC error {code} `{message}`")
         }
     }
 }
@@ -97,5 +110,13 @@ fn matches_kind(kind: &FindingKind, outcome: &CallOutcome) -> bool {
         (FindingKind::Crash, CallOutcome::Crash(_))
             | (FindingKind::Hang { .. }, CallOutcome::Hang(_))
             | (FindingKind::ProtocolError, CallOutcome::ProtocolError(_))
+    ) || matches!(
+        (kind, outcome),
+        (FindingKind::InternalError { code: want }, CallOutcome::JsonRpcError { code, .. })
+            if want == code
+    ) || matches!(
+        (kind, outcome),
+        (FindingKind::SecretLeak, CallOutcome::Ok(result))
+            if wallfacer_core::canary::leaked_in_result(result)
     )
 }

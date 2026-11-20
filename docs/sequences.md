@@ -78,8 +78,47 @@ sequences:
 | `call` | yes | Tool name. Skipped if the server doesn't advertise it. |
 | `with` | no | Input arguments. Defaults to `{}`. May contain step references. |
 | `bind` | no | Names the step's `{input, response}` envelope for later reference. |
-| `expect` | no | `ok` (default) or `error`. Coarse outcome check. |
-| `assert` | no | Per-step assertions; same vocabulary as single-tool invariants. |
+| `expect` | no | `ok` or `error`: a checked outcome; a mismatch fails the sequence. A JSON-RPC error reply counts as `error`; a crash, hang or protocol error never does. |
+| `require` | no | Precondition assertions (same vocabulary as `assert`). When one fails, the sequence is reported *inconclusive* (skipped, no finding): what the rest of the sequence relies on does not hold. A precondition may itself be a rejection, e.g. "the server refuses an absolute path outside its root" before testing whether `../` escapes it. A `require` step always runs as written, never mutated from the corpus. |
+| `assert` | no | Per-step assertions; same vocabulary as single-tool invariants. When the step has no `expect`, its assertions alone decide, so a check like "refused, or leaks nothing" passes on an `isError` reply. |
+
+A step with none of `expect`, `require` or `assert` is a **setup**
+step: it only has to succeed. If it returns `isError`, the sequence is
+reported *inconclusive*, because the setup never happened. The same
+applies when a later step references a value an earlier step didn't
+return. Sequence fixtures assert this with `expect: inconclusive`.
+
+### Precondition example
+
+```yaml
+steps:
+  # Is there a root to escape at all? A server that serves an absolute
+  # path outside it has full filesystem access by design.
+  - call: read_file
+    with: { path: "/etc/passwd" }
+    require:
+      - kind: any_of
+        assert:
+          - { kind: equals, lhs: { path: "$.response.isError" }, rhs: { value: true } }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: '(?m)^root:[^:\n]*:0:0:' }
+  # Only then is a `../` leak a traversal.
+  - call: read_file
+    with: { path: "../../../../etc/passwd" }
+    assert:
+      - kind: any_of
+        assert:
+          - { kind: equals, lhs: { path: "$.response.isError" }, rhs: { value: true } }
+          - kind: not
+            assertion: { kind: matches_regex, path: "$.response.content[0].text", pattern: '(?m)^root:[^:\n]*:0:0:' }
+```
+
+## Destructive-tool guard
+
+Sequences go through the same `[destructive]` / `[allow_destructive]`
+guard as single-tool invariants. A sequence with a step calling a
+blocked tool is skipped whole (reported under `skipped`), never
+half-run.
 
 ## Substitution syntax
 
@@ -102,23 +141,34 @@ Two substitution modes:
   returns a string. Use this for HTTP-header-style composition.
 
 References to steps that haven't run yet, or paths that don't
-resolve, surface as a structural error tagged on the step that
-attempted the substitution.
+resolve, make the sequence *inconclusive* at that step (in `pack test`
+fixtures they are a structural error: the fixture itself is wrong).
 
 ## Reconnect policy
 
-The runner holds a single `Client` for the duration of a sequence
-and *does not* reconnect on:
+The runner holds a single `Client` for the duration of a sequence and
+does not reconnect between steps, so authentication tokens, session ids
+and any other per-connection state survive across the chain.
 
-- transport hangs (the step is marked `Hang`-class outcome and the
-  sequence fails, but the connection stays alive in case the next
-  sequence wants to observe whatever state was left behind),
-- protocol-level errors (`-32601 method not found` on a step's
-  call: same — sequence fails, connection survives),
-- assertion failures.
+- A JSON-RPC error reply (`-32601 method not found`, `-32602`, …) is a
+  rejection: the step sees it as an `isError: true` result.
+- A hang, crash or protocol error ends the sequence at that step (a
+  crash is never mistaken for the rejection an `expect: error` step
+  wants). It is reported as a `hang`, `crash` or `protocol_error`
+  finding on the tool the step called — the same kind the fuzz and
+  invariant runners report for that tool — not as a `sequence_failure`.
+  The runner then reconnects before the next sequence: the connection
+  state is lost anyway, and one crash must not fail every later
+  sequence with "transport closed".
+- Any response containing wallfacer's canary secret (see
+  [architecture](./architecture.md#canary-secret)) ends the sequence
+  with a `secret_leak` finding on that tool.
+- A failed `expect` or `assert` is a `sequence_failure`, filed under the
+  sequence name with the step index.
 
-The single-tool property runner reconnects aggressively after each
-of these. Sequences trade aggressive recovery for state continuity.
+The single-tool property runner reconnects after each transport
+failure. Sequences never reconnect mid-chain: they trade recovery for
+state continuity.
 
 ## Pack examples
 

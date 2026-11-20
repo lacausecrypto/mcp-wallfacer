@@ -22,7 +22,10 @@ finding kind the harness can report.
 | `wrong_id_type` | `wallfacer differential --learn` then `wallfacer differential` | `SchemaViolation` |
 | `paginate` | `wallfacer property invariants.yaml` | `PropertyFailure` |
 | `bad_protocol` | `wallfacer fuzz` | `ProtocolError` |
+| `throws_internally` | `wallfacer fuzz` | `InternalError` |
 | `session_set` + `session_get` | `wallfacer torture --mode state-leak` | `StateLeak` |
+| `show_config` | `wallfacer fuzz` | `SecretLeak` (dumps the environment, including wallfacer's canary) |
+| `read_file` | `wallfacer property --pack path-traversal` | `SequenceFailure` (refuses absolute paths, but `../` escapes) |
 
 ## Running it
 
@@ -32,6 +35,8 @@ wallfacer doctor
 wallfacer fuzz --seed 0 --iterations 10 --include "crashes_now"
 wallfacer fuzz --seed 0 --iterations 10 --include "hangs_forever"
 wallfacer fuzz --seed 0 --iterations 10 --include "bad_protocol"
+wallfacer fuzz --seed 0 --iterations 10 --include "throws_internally"
+wallfacer fuzz --seed 0 --iterations 10 --include "show_config"
 wallfacer differential --learn
 wallfacer differential
 wallfacer property invariants.yaml

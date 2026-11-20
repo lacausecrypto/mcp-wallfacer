@@ -168,6 +168,9 @@ impl DifferentialPlan {
                 let mut should_break = false;
                 match outcome {
                     CallOutcome::Ok(result) if result.is_error == Some(true) => {}
+                    // A JSON-RPC error reply is an error result too: no
+                    // output to validate, and the server is still up.
+                    CallOutcome::JsonRpcError { .. } => {}
                     CallOutcome::Ok(result) => {
                         let response = response_value(&result);
                         let errors = validator

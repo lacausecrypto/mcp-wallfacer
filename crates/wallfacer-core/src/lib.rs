@@ -3,6 +3,7 @@
 // for new code. To be lifted progressively in Phase B/C.
 #![allow(missing_docs)]
 
+pub mod canary;
 pub mod client;
 pub mod corpus;
 pub mod coverage;

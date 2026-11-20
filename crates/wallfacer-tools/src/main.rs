@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use wallfacer_core::{
-    property::dsl::{parse, Assertion, ForEachToolBlock, InvariantFile, Operand},
+    property::dsl::{parse, Assertion, ForEachToolBlock, InvariantFile, Operand, Sequence},
     run::EMBEDDED_PACKS,
 };
 
@@ -205,6 +205,13 @@ fn render_pack(name: &str, source: &str, file: &InvariantFile) -> String {
         }
     }
 
+    if !file.sequences.is_empty() {
+        out.push_str("## Sequences\n\n");
+        for sequence in &file.sequences {
+            render_sequence(sequence, &mut out);
+        }
+    }
+
     out.push_str("## Source\n\n");
     out.push_str("Raw YAML, embedded into the binary at compile time:\n\n");
     out.push_str("```yaml\n");
@@ -214,6 +221,54 @@ fn render_pack(name: &str, source: &str, file: &InvariantFile) -> String {
     }
     out.push_str("```\n");
     out
+}
+
+fn render_sequence(sequence: &Sequence, out: &mut String) {
+    out.push_str(&format!("### `{}`\n\n", sequence.name));
+    if let Some(description) = &sequence.description {
+        out.push_str(description.trim());
+        out.push_str("\n\n");
+    }
+    for (index, step) in sequence.steps.iter().enumerate() {
+        let mut roles: Vec<String> = Vec::new();
+        if !step.require.is_empty() {
+            roles.push(format!(
+                "precondition: {}",
+                summarise_assertions(&step.require)
+            ));
+        }
+        if let Some(expect) = step.expect {
+            roles.push(format!("expect `{expect:?}`").to_lowercase());
+        }
+        if !step.assertions.is_empty() {
+            roles.push(format!(
+                "assert: {}",
+                summarise_assertions(&step.assertions)
+            ));
+        }
+        if roles.is_empty() {
+            roles.push("setup".to_string());
+        }
+        out.push_str(&format!(
+            "{}. `{}` — {}\n",
+            index + 1,
+            step.call,
+            roles.join("; ")
+        ));
+    }
+    if !sequence.test_fixtures.is_empty() {
+        let shapes: Vec<String> = sequence
+            .test_fixtures
+            .iter()
+            .map(|f| format!("`{:?}`", f.expect).to_lowercase())
+            .collect();
+        out.push_str(&format!(
+            "\n- **Test fixtures:** {} ({})\n",
+            sequence.test_fixtures.len(),
+            shapes.join(", ")
+        ));
+    }
+    out.push('\n');
 }
 
 fn render_for_each_block(block: &ForEachToolBlock, out: &mut String) {
