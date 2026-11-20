@@ -41,7 +41,7 @@ proptest = "1"
 rand = "0.8"
 rand_chacha = "0.3"
 regex = "1"
-rmcp = { version = "1.5", default-features = false, features = [
+rmcp = { version = "3.11", default-features = false, features = [
     "client",
     "transport-async-rw",
     "transport-streamable-http-client",

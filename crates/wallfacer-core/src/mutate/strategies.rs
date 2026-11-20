@@ -48,7 +48,7 @@ const SHORT_STRING_LEN: usize = 1024;
 
 /// Truncates, in document order, every long string that would push the
 /// payload past [`MAX_FUZZ_LONG_STRING_BYTES`] down to
-/// [`SHORT_STRING_LEN`] bytes. Returns `true` when anything was cut.
+/// 1 KiB. Returns `true` when anything was cut.
 pub fn cap_long_strings(value: &mut Value) -> bool {
     fn walk(value: &mut Value, remaining: &mut usize) -> bool {
         match value {

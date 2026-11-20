@@ -528,7 +528,7 @@ mod tests {
 
     fn text_result(body: String) -> CallOutcome {
         CallOutcome::Ok(rmcp::model::CallToolResult::success(vec![
-            rmcp::model::Content::text(body),
+            rmcp::model::ContentBlock::text(body),
         ]))
     }
 

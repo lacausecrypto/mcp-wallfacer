@@ -358,7 +358,7 @@ def scan(
     (d / "property.json").write_text(pr["out"])
     (d / "property.err").write_text(pr["err"][-200000:])
     res["property"] = {"rc": pr["rc"], "secs": pr["secs"]}
-    # rc 1 = findings; anything else with unparseable JSON is a harness/tool error
+    # rc 1 = findings; anything else with JSON that does not parse is a harness/tool error
     for name, step in (("fuzz", fz), ("property", pr)):
         try:
             json.loads(step["out"])
@@ -512,7 +512,7 @@ def retry_target(t: Dict[str, Any], a: argparse.Namespace) -> str:
             st["first_scan"] = st["scan"]
         if found is None:
             needs = bool(env) or any(
-                re.search(r"api[_ -]?key|token|credential|not set|required|missing|configur", at["stderr"], re.I)
+                re.search(r"api[_ -]?key|token|credential|not set|required|missing|configure|configuration", at["stderr"], re.I)
                 for at in attempts
             )
             st["scan"] = {"status": "needs_config" if needs else "no_start", "env_tried": sorted(env)}

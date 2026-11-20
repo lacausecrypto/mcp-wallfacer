@@ -1070,7 +1070,7 @@ mod tests {
     }
 
     fn text(body: &str, is_error: bool) -> crate::client::CallOutcome {
-        let content = vec![rmcp::model::Content::text(body.to_string())];
+        let content = vec![rmcp::model::ContentBlock::text(body.to_string())];
         crate::client::CallOutcome::Ok(if is_error {
             rmcp::model::CallToolResult::error(content)
         } else {

@@ -11,6 +11,25 @@ servers run in a network-less sandbox): most findings were false
 positives produced by wallfacer itself, and one class of real failures
 was hidden.
 
+### Security — rmcp 1.5 → 3.11 (RUSTSEC-2026-0462)
+
+rmcp before 3.9.0 buffered Streamable HTTP response bodies with no size
+limit: a hostile MCP server could exhaust the client's memory with an
+endless body, before authentication. Wallfacer connects to untrusted
+servers by design, so its HTTP transport was exposed. rmcp 3.11 caps
+JSON bodies at 16 MiB and error bodies at 64 KiB. The only API change
+wallfacer needed was the `Content` → `ContentBlock` rename in tests.
+tokio (1.54.1), anyhow (1.0.104) and rustix (1.1.6) are bumped past
+their unsoundness advisories. The chrono "unmaintained" notice is
+ignored in `deny.toml`: rmcp depends on chrono, so it stays in the
+graph either way.
+
+### CI
+
+- Coverage job gets `pull-requests: write` for its PR comment, and skips
+  the comment on fork PRs, whose token is read-only.
+- Fixed a rustdoc link to a private item and two typos flagged by `typos`.
+
 ### Fixed — prompt-injection probes failed on their own echo
 
 The `prompt-injection` and `prompt-injection-v2` failure patterns

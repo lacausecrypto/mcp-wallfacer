@@ -16,7 +16,12 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+    # chrono is unmaintained (informational, no vulnerability). rmcp — the MCP
+    # SDK, already at its latest release — depends on it, so it stays in the
+    # graph whatever wallfacer itself uses. Revisit when rmcp drops it.
+    { id = "RUSTSEC-2026-0543", reason = "transitive via rmcp (latest); unmaintained notice, no vulnerability" },
+]
 
 [licenses]
 version = 2
