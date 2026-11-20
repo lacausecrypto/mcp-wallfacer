@@ -84,7 +84,7 @@ Every finding lands at `.wallfacer/corpus/<tool>/<id>.json` with the exact seed 
 | **GitHub release** | [download tarball](https://github.com/lacausecrypto/mcp-wallfacer/releases) | air-gapped servers, no toolchain |
 | **npm** | `npm install -g mcp-wallfacer` | TypeScript / Node MCP authors |
 | **pip** | `pip install mcp-wallfacer` | Python MCP authors |
-| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.8.1` | CI gating with caching |
+| **GitHub Action** | `uses: lacausecrypto/mcp-wallfacer@v0.9.0` | CI gating with caching |
 
 The npm and pip wrappers are thin launchers that download the matching prebuilt binary at install / first-run time; the underlying CLI is byte-identical to a `cargo install` build of the same version. Crate name: `mcp-wallfacer`. Binary name: `wallfacer`. Full details in [`docs/install.md`](docs/install.md).
 
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: lacausecrypto/mcp-wallfacer@v0.8.1
+      - uses: lacausecrypto/mcp-wallfacer@v0.9.0
         with:
           pack-all: "true"          # or pack: "security\nstateful"
           config: wallfacer.toml
@@ -251,7 +251,8 @@ A parallel HTTP fixture lives at [`examples/python_server/server_http.py`](examp
 
 - **v0.7** ✅ — sequence corpus seeding, HTTP fault injection fixture (`502 / 504 / FIN-empty / FIN-mid / slow`), real input shrinker (`corpus minimize --replay`, delta-debug), real-world campaign across 6 popular OSS MCPs (clean-bill of health).
 - **v0.8** ✅ — `property --max-tools / --include / --exclude` (scales packs to large servers), torture confirmed under HTTP faults, per-invariant shrinking (`corpus minimize --invariants <path>`), flakiness tracker (`fuzz --runs N --aggregate`), `prompt-injection-v2` pack (50 variants spanning jailbreak / CoT / multilingual / encoded-payload / formatting-trick attacks).
-- **v0.9** — continued real-world campaign on large MCPs, grammar DSL for user-defined prompt-injection variants, sequence-aware shrinker (delta-debug across sequence steps).
+- **v0.9** ✅ — real-world campaign on 302 popular npm / PyPI MCP servers (sandboxed harness in `campaign/`), canary-based `secret_leak` detection, false-positive sweep across fuzz, packs and sequences, `require:` preconditions, rmcp 3.11.
+- **v0.10** — grammar DSL for user-defined prompt-injection variants, sequence-aware shrinker (delta-debug across sequence steps).
 
 ## Contributing
 

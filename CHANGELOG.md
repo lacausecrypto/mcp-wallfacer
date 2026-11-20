@@ -4,12 +4,32 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely
 and the project adheres to [SemVer](https://semver.org).
 
-## Unreleased
+## v0.9.0 — 2026-11-20
 
-Fixes found by the v0.8 real-world campaign (popular npm / PyPI MCP
+Fixes found by the v0.8 real-world campaign (302 popular npm / PyPI MCP
 servers run in a network-less sandbox): most findings were false
 positives produced by wallfacer itself, and one class of real failures
 was hidden.
+
+Highlights:
+
+- **New `secret_leak` finding (critical).** Wallfacer plants a canary
+  secret in the environment of every stdio server it spawns and flags any
+  response that discloses it, in fuzz, property and sequence runs. The
+  campaign found a real disclosure in a widely used server (reported
+  privately).
+- **Far fewer false positives.** Fuzz payloads stay under the 10 MiB SDK
+  transport cap, schema-invalid inputs no longer count as internal
+  errors, probes can no longer fail on their own echo, and path traversal
+  only flags servers that enforce a root.
+- **Typed sequence failures.** A crash, hang or leak during a sequence
+  step is reported as that kind on the tool, and the runner reconnects
+  before the next sequence.
+- **Behaviour changes.** `suggest` no longer applies the `auth` pack, and
+  sequence steps accept `require:` preconditions.
+- **Security.** rmcp 3.11 bounds Streamable HTTP response bodies
+  (RUSTSEC-2026-0462): a hostile server can no longer exhaust wallfacer's
+  memory.
 
 ### Security — rmcp 1.5 → 3.11 (RUSTSEC-2026-0462)
 
